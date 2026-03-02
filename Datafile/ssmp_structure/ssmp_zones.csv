@@ -1,0 +1,42 @@
+zone_id,sector_id,ref_type,ref_id,building_id,level_id,zone_name,zone_type,definition_type,polygon_id,risk_level,congestion_prone,status
+ZN-00117,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB16,other,polygon,PG-ZN-00117,medium,False,active
+ZN-00118,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB15,other,polygon,PG-ZN-00118,medium,False,active
+ZN-00119,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB11,other,polygon,PG-ZN-00119,medium,False,active
+ZN-00120,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB09,other,polygon,PG-ZN-00120,medium,False,active
+ZN-00121,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB08_밀폐,confined_space,polygon,PG-ZN-00121,critical,True,active
+ZN-00122,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB07,other,polygon,PG-ZN-00122,medium,False,active
+ZN-00165,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB02_밀폐,confined_space,polygon,PG-ZN-00165,critical,True,active
+ZN-00173,SEC-00022,level,LVL-00022-001-002,BLD-00022-001,LVL-00022-001-002,TB17_밀폐,confined_space,polygon,PG-ZN-00173,critical,True,active
+ZN-00148,SEC-00022,level,LVL-00022-002-004,BLD-00022-002,LVL-00022-002-004,FAB_휴게실_F02_1층4번,amenity_rest,polygon,PG-ZN-00148,low,True,active
+ZN-00149,SEC-00022,level,LVL-00022-002-004,BLD-00022-002,LVL-00022-002-004,FAB_휴게실_F03_1층2번,amenity_rest,polygon,PG-ZN-00149,low,True,active
+ZN-00150,SEC-00022,level,LVL-00022-002-004,BLD-00022-002,LVL-00022-002-004,FAB_휴게실_F02_1층1번,amenity_rest,polygon,PG-ZN-00150,low,True,active
+ZN-00175,SEC-00022,level,LVL-00022-001-010,BLD-00022-001,LVL-00022-001-010,WWT 2F 휴게실,amenity_rest,polygon,PG-ZN-00175,low,True,active
+ZN-00070,SEC-00022,sector,SEC-00022,,,GATE #1,checkpoint_gate,polygon,PG-ZN-00070,high,True,active
+ZN-00072,SEC-00022,sector,SEC-00022,,,공사현장,work_area,polygon,PG-ZN-00072,high,False,active
+ZN-00074,SEC-00022,sector,SEC-00022,,,GATE #4,checkpoint_gate,polygon,PG-ZN-00074,high,True,active
+ZN-00076,SEC-00022,sector,SEC-00022,,,WWT 목적지,work_area,polygon,PG-ZN-00076,high,False,active
+ZN-00079,SEC-00022,sector,SEC-00022,,,전진,amenity_rest,polygon,PG-ZN-00079,low,True,active
+ZN-00082,SEC-00022,sector,SEC-00022,,,저수조 목적지,target_area,polygon,PG-ZN-00082,medium,False,active
+ZN-00083,SEC-00022,sector,SEC-00022,,,흡연장 (전진사무실),amenity_smoking,polygon,PG-ZN-00083,low,True,active
+ZN-00089,SEC-00022,sector,SEC-00022,,,전진사무실 목적지,target_area,polygon,PG-ZN-00089,medium,False,active
+ZN-00090,SEC-00022,sector,SEC-00022,,,CUB 목적지,work_area,polygon,PG-ZN-00090,high,False,active
+ZN-00091,SEC-00022,sector,SEC-00022,,,FAB 목적지,work_area,polygon,PG-ZN-00091,high,False,active
+ZN-00094,SEC-00022,sector,SEC-00022,,,154kV 목적지,target_area,polygon,PG-ZN-00094,medium,False,active
+ZN-00096,SEC-00022,sector,SEC-00022,,,본진사무실 목적지,target_area,polygon,PG-ZN-00096,medium,False,active
+ZN-00107,SEC-00022,sector,SEC-00022,,,휴게실 (본진 정문 건너),amenity_rest,polygon,PG-ZN-00107,low,True,active
+ZN-00110,SEC-00022,sector,SEC-00022,,,흡연장 (본진 B동 건너),amenity_rest,polygon,PG-ZN-00110,low,True,active
+ZN-00114,SEC-00022,sector,SEC-00022,,,저수조,other,polygon,PG-ZN-00114,medium,False,active
+ZN-00115,SEC-00022,sector,SEC-00022,,,휴게실 (정수장 옆),amenity_rest,polygon,PG-ZN-00115,low,True,active
+ZN-00116,SEC-00022,sector,SEC-00022,,,154kV,other,polygon,PG-ZN-00116,medium,False,active
+ZN-00142,SEC-00022,sector,SEC-00022,,,본진 타각기 입구,checkpoint_timeclock,polygon,PG-ZN-00142,high,True,active
+ZN-00143,SEC-00022,sector,SEC-00022,,,본진 타각기 출구,checkpoint_timeclock,polygon,PG-ZN-00143,high,True,active
+ZN-00146,SEC-00022,sector,SEC-00022,,,휴게실 (전진 사무실 뒷편),amenity_rest,polygon,PG-ZN-00146,low,True,active
+ZN-00147,SEC-00022,sector,SEC-00022,,,흡연장 (타각기 근처),amenity_rest,polygon,PG-ZN-00147,low,True,active
+ZN-00160,SEC-00022,sector,SEC-00022,,,BP사무실 목적지,target_area,polygon,PG-ZN-00160,medium,False,active
+ZN-00161,SEC-00022,sector,SEC-00022,,,주차장 목적지,parking,polygon,PG-ZN-00161,medium,False,active
+ZN-00162,SEC-00022,sector,SEC-00022,,,본진,amenity_rest,polygon,PG-ZN-00162,low,True,active
+ZN-00164,SEC-00022,sector,SEC-00022,,,GATE #2 서측 공동구,checkpoint_gate,polygon,PG-ZN-00164,high,True,active
+ZN-00166,SEC-00022,sector,SEC-00022,,,지원 1_3BL,other,polygon,PG-ZN-00166,medium,False,active
+ZN-00167,SEC-00022,sector,SEC-00022,,,지원 4BL,other,polygon,PG-ZN-00167,medium,False,active
+ZN-00168,SEC-00022,sector,SEC-00022,,,WWT 호이스트,hoist,polygon,PG-ZN-00168,high,True,active
+ZN-00169,SEC-00022,sector,SEC-00022,,,주차장,parking,polygon,PG-ZN-00169,medium,False,active

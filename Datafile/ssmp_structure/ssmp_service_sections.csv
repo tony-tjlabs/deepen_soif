@@ -1,0 +1,49 @@
+service_section_id,sector_id,service_section_name,service_domain,risk_level,congestion_prone,status
+SS-00106,SEC-00022,WWT B1F (전체),safety,high,False,active
+SS-00117,SEC-00022,TB16,other,medium,False,active
+SS-00118,SEC-00022,TB15,other,medium,False,active
+SS-00119,SEC-00022,TB11,other,medium,False,active
+SS-00120,SEC-00022,TB09,other,medium,False,active
+SS-00121,SEC-00022,TB08_밀폐,safety,critical,True,active
+SS-00122,SEC-00022,TB07,other,medium,False,active
+SS-00165,SEC-00022,TB02_밀폐,safety,critical,True,active
+SS-00173,SEC-00022,TB17_밀폐,safety,critical,True,active
+SS-00095,SEC-00022,WWT 1F (전체),safety,high,False,active
+SS-00103,SEC-00022,FAB 1F (전체),safety,high,False,active
+SS-00148,SEC-00022,FAB_휴게실_F02_1층4번,facility,low,True,active
+SS-00149,SEC-00022,FAB_휴게실_F03_1층2번,facility,low,True,active
+SS-00150,SEC-00022,FAB_휴게실_F02_1층1번,facility,low,True,active
+SS-00104,SEC-00022,CUB 1F (전체),safety,high,False,active
+SS-00105,SEC-00022,CUB B1F (전체),safety,high,False,active
+SS-00174,SEC-00022,WWT 2F (전체),safety,high,False,active
+SS-00175,SEC-00022,WWT 2F 휴게실,facility,low,True,active
+SS-00070,SEC-00022,GATE #1,access_control,high,True,active
+SS-00072,SEC-00022,공사현장,safety,high,False,active
+SS-00074,SEC-00022,GATE #4,access_control,high,True,active
+SS-00076,SEC-00022,WWT 목적지,safety,high,False,active
+SS-00079,SEC-00022,전진,facility,low,True,active
+SS-00082,SEC-00022,저수조 목적지,productivity,medium,False,active
+SS-00083,SEC-00022,흡연장 (전진사무실),facility,low,True,active
+SS-00089,SEC-00022,전진사무실 목적지,productivity,medium,False,active
+SS-00090,SEC-00022,CUB 목적지,safety,high,False,active
+SS-00091,SEC-00022,FAB 목적지,safety,high,False,active
+SS-00094,SEC-00022,154kV 목적지,productivity,medium,False,active
+SS-00096,SEC-00022,본진사무실 목적지,productivity,medium,False,active
+SS-00107,SEC-00022,휴게실 (본진 정문 건너),facility,low,True,active
+SS-00110,SEC-00022,흡연장 (본진 B동 건너),facility,low,True,active
+SS-00112,SEC-00022,본진 식당,facility,low,True,active
+SS-00114,SEC-00022,저수조,other,medium,False,active
+SS-00115,SEC-00022,휴게실 (정수장 옆),facility,low,True,active
+SS-00116,SEC-00022,154kV,other,medium,False,active
+SS-00142,SEC-00022,본진 타각기 입구,access_control,high,True,active
+SS-00143,SEC-00022,본진 타각기 출구,access_control,high,True,active
+SS-00146,SEC-00022,휴게실 (전진 사무실 뒷편),facility,low,True,active
+SS-00147,SEC-00022,흡연장 (타각기 근처),facility,low,True,active
+SS-00160,SEC-00022,BP사무실 목적지,productivity,medium,False,active
+SS-00161,SEC-00022,주차장 목적지,facility,medium,False,active
+SS-00162,SEC-00022,본진,facility,low,True,active
+SS-00164,SEC-00022,GATE #2 서측 공동구,access_control,high,True,active
+SS-00166,SEC-00022,지원 1_3BL,other,medium,False,active
+SS-00167,SEC-00022,지원 4BL,other,medium,False,active
+SS-00168,SEC-00022,WWT 호이스트,safety,high,True,active
+SS-00169,SEC-00022,주차장,facility,medium,False,active
