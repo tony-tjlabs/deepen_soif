@@ -1,82 +1,30 @@
 """
-Journey 보정 전처리 모듈.
-Raw CSV 데이터에서 작업자의 Journey를 보정하여 더 정확한 행동 패턴을 추출한다.
+배포(Release) 빌드용 경량 preprocessor 스텁 모듈.
 
-전처리 파이프라인 (preprocess):
-  Step 1: 활성비율 계산 + coverage_gap / signal_confidence
-  Step 2: 장소 분류 (SSMP 또는 키워드)
-  Step 3: 작업자 키 생성
-  Step 4: 시간 파생 컬럼
-  Step 5: 작업자별 Journey 보정
-    Phase 0: DBSCAN 좌표계별 클러스터링 (nearest-cluster 노이즈 보정)
-    Phase 1: 헬멧 거치 패턴 보정 (REST 장소 제외)
-    Phase 2: 좌표 이상치 보정
-    Phase 2-post: 좌표↔장소명 정합성 검증
-  Step 5-post: CORRECTED_PLACE 기반 PLACE_TYPE / LOCATION_KEY 재분류
-  Step 6: 활동 유형 분류 (PERIOD_TYPE)
+개발 리포지토리에서는 복잡한 Journey 보정 로직이 포함되어 있지만,
+배포용 레포에서는 전처리를 실행하지 않고, 사전에 생성된 Parquet 캐시만 사용한다.
+
+따라서 이 모듈은 import 호환성만 유지하고, 실제 전처리 실행은 막는다.
 """
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from src.data.schema import RawColumns, ProcessedColumns
-from src.utils.constants import (
-    ACTIVE_RATIO_WORKING_THRESHOLD,
-    ACTIVE_RATIO_ZERO_THRESHOLD,
-    LOCATION_SMOOTHING_WINDOW,
-    HELMET_RACK_MIN_DURATION_MIN,
-    COORD_OUTLIER_THRESHOLD,
-    DBSCAN_EPS_INDOOR,
-    DBSCAN_EPS_OUTDOOR,
-    DBSCAN_MIN_SAMPLES,
-    SpaceFunction,
-    DBSCAN_EPS_MULTIPLIER,
-    STATE_OVERRIDE_SPACES,
-    DWELL_NORMAL_MAX,
-    TRANSITION_INTER_LOCATION_MIN,
-    TRANSITION_SAME_LOCATION_MIN,
-    TRANSITION_FROM_ENTRY_MIN,
-    TRANSITION_FROM_REST_MIN,
-    TRANSITION_MAX_RATIO,
-    TRANSITION_TRAVEL_EXCLUDE_DEST,
-    # v5: Intelligent Sequence Interpreter
-    SPACE_DWELL_PROFILE,
-    SEQUENCE_WINDOW_MIN,
-    SEQUENCE_VARIETY_THRESH,
-    # v6: 4증거 통합 Journey 보정
-    ACTIVE_SIG_GHOST_MAX,
-    ACTIVE_SIG_TRANSIT_MAX,
-    ACTIVE_SIG_WORK_MIN,
-    LOCATION_ENTROPY_WINDOW,
-    LOCATION_UNSTABLE_THRESH,
-    RUN_SHORT_MAX,
-    RUN_CONTINUOUS_MIN,
-    NIGHT_END_HOUR,
-    PREDAWN_WORK_START,
-    POST_WORK_HOUR,
-    GHOST_SIGNAL_RACK_SEARCH_WINDOW,
-    SPACE_FUNCTION_PRIORITY,
-    TRANSIT_ONLY_FUNCTIONS,
-    ANCHOR_SPACE_FUNCTIONS,
-    ANCHOR_PLACE_KEYWORDS,
-    WORK_HOURS_START,
-    WORK_HOURS_END,
-    LUNCH_START,
-    LUNCH_END,
-    # v6.1: Multi-Pass Refinement
-    GHOST_MIN_BLOCK_LEN,
-    GHOST_WORK_MIN_BLOCK_LEN,
-    NARRATIVE_ANCHOR_MIN_DWELL,
-    NARRATIVE_WORK_MIN_RATIO,
-    IMPOSSIBLE_MOVE_SPEED,
-    IMPOSSIBLE_BUILDING_JUMP_MIN,
-    CONVERGENCE_CHANGE_THRESH,
-    MULTI_PASS_MAX_ITERATIONS,
+
+try:
+    import streamlit as st
+except ImportError:  # 배포 환경이 아니거나 streamlit 미설치 시
+    st = None  # type: ignore
+
+
+__all__ = ["preprocess"]
+from src.utils.llm_interpreter import (
+    is_llm_available,
+    is_ambiguous_inactive_run,
+    classify_run_with_llm,
 )
 from src.utils.place_classifier import (
     add_place_columns,
@@ -91,7 +39,27 @@ from src.utils.place_classifier import (
 from src.utils.time_utils import classify_activity_period, is_night_or_dawn, is_lunch_time
 from src.utils.constants import REST_AREA_KEYWORDS, ANCHOR_SPACE_FUNCTIONS, ANCHOR_PLACE_KEYWORDS
 
-logger = logging.getLogger(__name__)
+def preprocess(raw_df: pd.DataFrame, spatial_ctx: Optional[object] = None) -> pd.DataFrame:
+    """
+    배포 버전에서는 전처리 파이프라인을 실행하지 않는다.
+
+    - 로컬 개발 환경(TJLABS_Research 프로젝트)에서 전처리를 실행해
+      processed_*.parquet, analytics_*.parquet 을 만든 뒤
+    - Release/DeepCon_SOIF/cache 폴더에 해당 파일만 배포한다.
+
+    이 스텁 함수는 UI/캐시 매니저의 import 호환성만 유지하며,
+    호출 시 명시적으로 예외를 발생시킨다.
+    """
+    msg = (
+        "배포(Release) 빌드에서는 전처리(preprocess)를 실행할 수 없습니다. "
+        "로컬 개발 프로젝트에서 파이프라인을 실행해 캐시를 생성한 뒤, "
+        "생성된 processed_*.parquet / analytics_*.parquet 파일만 배포해 주세요."
+    )
+    if st is not None:
+        st.warning(msg)
+    else:
+        print(msg)
+    raise RuntimeError("preprocess() is disabled in the deployment build.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -431,7 +399,204 @@ def _correct_worker_journey(df: pd.DataFrame) -> pd.DataFrame:
         f"Multi-Pass 완료: {len(pass_stats)}회 반복, 총 {total_all_passes}행 보정"
     )
 
+    # ─── Rule 기반 장시간 비활성 off-duty 판정 ─────────────────────────────
+    result = _apply_long_off_duty_pass(result)
+
+    # ─── LLM 보조 패스: 애매한 장시간 비활성 Run 재분류 ──────────────────────
+    if is_llm_available():
+        try:
+            result = _apply_llm_run_pass(result)
+        except Exception as e:
+            logger.warning(f"LLM Run 분류 패스 실패 (무시하고 진행): {e}")
+
     return result
+
+
+def _apply_llm_run_pass(df_worker: pd.DataFrame) -> pd.DataFrame:
+    """
+    Journey 보정 이후, 애매한 장시간 비활성 Run 에 대해 LLM 분류를 적용.
+
+    규칙이 이미 명확히 off_duty/REST로 분류한 구간은 LLM 대상에서 제외한다.
+    """
+    from src.data.schema import RawColumns, ProcessedColumns
+
+    if df_worker.empty:
+        return df_worker
+
+    runs = _build_journey_runs(df_worker)
+    if not runs:
+        return df_worker
+
+    # 간단한 Journey 맥락 (이름/날짜/주요 장소)
+    worker_name = str(df_worker[RawColumns.WORKER].iloc[0]) if RawColumns.WORKER in df_worker.columns else "작업자"
+    date_str = str(df_worker[ProcessedColumns.DATE].iloc[0]) if ProcessedColumns.DATE in df_worker.columns else ""
+    main_places = (
+        df_worker[ProcessedColumns.CORRECTED_PLACE]
+        .value_counts()
+        .head(5)
+        .index.tolist()
+        if ProcessedColumns.CORRECTED_PLACE in df_worker.columns
+        else []
+    )
+
+    journey_ctx_base = {
+        "worker_name": worker_name,
+        "date": date_str,
+        "shift_start_hour": None,
+        "shift_end_hour": None,
+        "main_places": main_places,
+    }
+
+    # LLM 결과 기록 컬럼 초기화
+    if ProcessedColumns.LLM_LABEL not in df_worker.columns:
+        df_worker[ProcessedColumns.LLM_LABEL] = ""
+    if ProcessedColumns.LLM_REASON not in df_worker.columns:
+        df_worker[ProcessedColumns.LLM_REASON] = ""
+    if ProcessedColumns.LLM_CONF not in df_worker.columns:
+        df_worker[ProcessedColumns.LLM_CONF] = np.nan
+
+    times = df_worker[RawColumns.TIME].values
+
+    for idx, run in enumerate(runs):
+        start_idx = run.start_idx
+        end_idx = run.end_idx
+        start_ts = times[start_idx]
+        end_ts = times[end_idx] + pd.Timedelta(minutes=1)
+        duration = end_idx - start_idx + 1
+
+        avg_ratio = float(
+            df_worker[ProcessedColumns.ACTIVE_RATIO].iloc[start_idx : end_idx + 1].mean()
+            if ProcessedColumns.ACTIVE_RATIO in df_worker.columns
+            else 0.0
+        )
+
+        run_dict = {
+            "place": run.place,
+            "place_type": run.space_function,
+            "start_time": start_ts,
+            "end_time": end_ts,
+            "duration_min": duration,
+            "avg_active_ratio": avg_ratio,
+            "hour_start": int(pd.Timestamp(start_ts).hour),
+            "rule_label": None,
+        }
+
+        if not is_ambiguous_inactive_run(run_dict):
+            continue
+
+        ctx = dict(journey_ctx_base)
+        ctx["prev_run"] = runs[idx - 1].__dict__ if idx > 0 else None
+        ctx["next_run"] = runs[idx + 1].__dict__ if idx < len(runs) - 1 else None
+
+        res = classify_run_with_llm(run_dict, ctx)
+
+        mask = (df_worker[RawColumns.TIME] >= start_ts) & (df_worker[RawColumns.TIME] < end_ts)
+        df_worker.loc[mask, ProcessedColumns.LLM_LABEL] = res["label"]
+        df_worker.loc[mask, ProcessedColumns.LLM_REASON] = res["reason"]
+        df_worker.loc[mask, ProcessedColumns.LLM_CONF] = res["confidence"]
+
+        # classify_run_with_llm 내부에서 이미 신뢰도 임계값을 적용해
+        # source 를 'llm' 또는 'rule_fallback' 으로 구분하므로,
+        # 여기서는 source 값을 기준으로 PERIOD_TYPE을 업데이트한다.
+        if res.get("source") == "llm":
+            df_worker.loc[mask, ProcessedColumns.PERIOD_TYPE] = res["period_type"]
+
+    return df_worker
+
+
+def _apply_long_off_duty_pass(df_worker: pd.DataFrame) -> pd.DataFrame:
+    """
+    장시간 거의 완전 비활성 Run 을 비근무(off-duty)로 재분류하는 순수 rule 기반 패스.
+
+    휴게(rest)와 비근무(off-duty)를 구분하기 위한 기준:
+      - REST 공간에서 10~60분 정도 머무는 구간은 휴게(rest)로 유지
+      - TRANSIT_GATE(타각기/게이트) 처럼 이동·출입용 공간에서
+        활성비율이 거의 0이고(대부분 0.0), 연속 길이가 90분 이상이며
+        새벽/야간(pre_work/post_work 구간 포함)에 발생한 구간은
+        → 실제 휴게가 아니라 비근무(off-duty)로 간주
+    """
+    from src.data.schema import RawColumns, ProcessedColumns
+    from src.utils.constants import (
+        SpaceFunction,
+        NIGHT_HOURS_START,
+        DAWN_HOURS_END,
+        ACTIVE_RATIO_ZERO_THRESHOLD,
+    )
+
+    if df_worker.empty:
+        return df_worker
+
+    df = df_worker.copy()
+    runs = _build_journey_runs(df)
+    if not runs:
+        return df
+
+    # 시간대 / 활성비율 정보
+    if ProcessedColumns.HOUR in df.columns:
+        hours = df[ProcessedColumns.HOUR].fillna(0).astype(int).values
+    else:
+        hours = np.zeros(len(df), dtype=int)
+
+    if ProcessedColumns.ACTIVE_RATIO in df.columns:
+        ratios = df[ProcessedColumns.ACTIVE_RATIO].fillna(0.0).astype(float).values
+    else:
+        ratios = np.zeros(len(df), dtype=float)
+
+    # PERIOD_TYPE/STATE_DETAIL 컬럼 보장
+    if ProcessedColumns.PERIOD_TYPE not in df.columns:
+        df[ProcessedColumns.PERIOD_TYPE] = "off"
+    if ProcessedColumns.STATE_DETAIL not in df.columns:
+        df[ProcessedColumns.STATE_DETAIL] = ""
+
+    # 새벽/야간 장시간 비활성 구간은 조금 더 공격적으로 off-duty 로 본다.
+    # - 최소 길이: 60분 이상
+    # - 구간 내 90% 이상이 완전 비활성이거나, 전체 활성 비율 합이 매우 작을 때
+    LONG_INACTIVE_MIN = 60    # 1시간 이상 거의 비활성 구간은 휴게로 보기 어려움
+    OFF_RATIO_MIN     = 0.90  # 90% 이상이 완전 비활성일 때 off-duty 로 판정
+
+    for run in runs:
+        length = int(run.length)
+        sf     = run.space_function
+        seg    = run.segment_type
+
+        if length < LONG_INACTIVE_MIN:
+            continue
+
+        # 공식 휴게 시설(REST)은 여기서 건드리지 않음 (기존 휴게 로직 유지)
+        if sf == SpaceFunction.REST:
+            continue
+
+        # 구간 내 활성비율이 거의 0인지 확인
+        start_i = run.start_idx
+        end_i   = run.end_idx
+        window  = ratios[start_i : end_i + 1]
+        if len(window) == 0:
+            continue
+        off_mask   = window < ACTIVE_RATIO_ZERO_THRESHOLD
+        off_ratio  = off_mask.sum() / float(len(window))
+        active_sum = float(window.sum())
+
+        # (1) 대부분이 완전 비활성인 경우
+        # (2) 혹은 전체 활성 합이 매우 작아서 "잠깐 흔들림 + 긴 정지" 패턴인 경우
+        if off_ratio < OFF_RATIO_MIN and active_sum >= 5.0:
+            # 활성 비율 합이 5.0 이상이면, 실제로는 어느 정도 활동이 있다고 보고 제외
+            continue
+
+        # 시간대: 새벽/야간 또는 pre_work / post_work 세그먼트
+        start_hour = int(hours[start_i]) if start_i < len(hours) else 0
+        in_night   = (start_hour >= NIGHT_HOURS_START or start_hour < DAWN_HOURS_END)
+        if not in_night and seg not in ("pre_work", "post_work"):
+            continue
+
+        # 여기까지 오면: 새벽/야간 TRANSIT_GATE 등에서 장시간 거의 완전 비활성 Run
+        idx_slice = df.index[start_i : end_i + 1]
+        df.loc[idx_slice, ProcessedColumns.PERIOD_TYPE] = "off"
+
+        # state_detail 은 기존 값과 무관하게 off-duty 장시간 비활성으로 덮어쓴다.
+        # (예: 새벽 게이트 혼잡(gate_congestion) → 실제로는 비근무 대기 가능성이 높음)
+        df.loc[idx_slice, ProcessedColumns.STATE_DETAIL] = "off_duty_long_inactive"
+
+    return df
 
 
 def _cluster_locations_by_key(df_worker: pd.DataFrame) -> pd.DataFrame:
@@ -584,8 +749,9 @@ def _correct_noise_by_cluster(df_worker: pd.DataFrame) -> pd.DataFrame:
       실제 이동 구간일 가능성이 높음.
 
     ★ v5.2 앵커 공간 보호:
-      REST, RACK 등 앵커 공간은 짧은 체류가 정상이므로
-      SPATIAL_CLUSTER == -1 이어도 절대 덮어쓰지 않는다.
+      REST, RACK, TRANSIT_GATE(타각기/게이트) 등 앵커 공간은
+      출근 전 헬멧 걸이·휴식 등으로 체류가 길어질 수 있으므로
+      SPATIAL_CLUSTER == -1 이어도 nearest-cluster로 덮어쓰지 않는다.
       앵커이면서 노이즈인 행: SPATIAL_CLUSTER를 -2로 설정 (앵커 보호 마커)
     """
     if ProcessedColumns.CLUSTER_PLACE not in df_worker.columns:

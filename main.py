@@ -42,7 +42,7 @@ from src.data.cache_manager import (
     load_multi_date_cache,
     load_analytics_or_compute,
 )
-from src.data.loader import scan_data_folders
+from src.data.loader import scan_data_folders_with_sector
 from src.utils.theme import GLOBAL_CSS, Color
 from src.utils.time_utils import extract_date_from_folder
 from src.utils.llm_interpreter import get_llm_status
@@ -82,51 +82,56 @@ st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
 # ── 캐시 함수 ──────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def load_cached_data(date_str: str) -> Optional[pd.DataFrame]:
-    return ParquetCacheManager(CACHE_DIR).load(date_str)
+def load_cached_data(date_str: str, sector: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """Sector별 캐시 로드. sector 없으면 기존 형식(processed_YYYYMMDD) 사용."""
+    return ParquetCacheManager(CACHE_DIR).load(date_str, sector or None)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def load_multi_date(dates_tuple: tuple) -> pd.DataFrame:
-    return load_multi_date_cache(list(dates_tuple), CACHE_DIR)
+def load_multi_date(dates_tuple: tuple, sector: Optional[str] = None) -> pd.DataFrame:
+    return load_multi_date_cache(list(dates_tuple), CACHE_DIR, sector)
 
 
 @st.cache_data(show_spinner=False)
-def get_cache_dates() -> list[str]:
-    return ParquetCacheManager(CACHE_DIR).get_available_dates()
+def load_analytics_cached(date_str: str, sector: Optional[str] = None):
+    """분석 캐시 로드. sector 있으면 해당 Sector 캐시."""
+    return ParquetCacheManager(CACHE_DIR).load_analytics(date_str, sector or None)
 
 
-@st.cache_data(show_spinner=False)
-def load_analytics_cached(date_str: str):
-    """분석 캐시 로드 (배포 시 사전 생성된 지표 사용)."""
-    return ParquetCacheManager(CACHE_DIR).load_analytics(date_str)
-
-
-def get_analytics(date_str: str, df: pd.DataFrame) -> dict:
-    """분석 결과 반환: 캐시 있으면 로드, 없으면 계산 (로컬 폴백)."""
-    a = load_analytics_cached(date_str)
+def get_analytics(date_str: str, df: pd.DataFrame, sector: Optional[str] = None) -> dict:
+    """분석 결과 반환: 캐시 있으면 로드, 없으면 계산. Sector별 항목 구분."""
+    a = load_analytics_cached(date_str, sector)
     if a is not None:
         return a
-    return load_analytics_or_compute(ParquetCacheManager(CACHE_DIR), date_str, df)
+    return load_analytics_or_compute(ParquetCacheManager(CACHE_DIR), date_str, df, sector)
 
 
 @st.cache_data(show_spinner=False)
-def get_raw_dates() -> list[str]:
-    return [
-        d for f in scan_data_folders(DATAFILE_ROOT)
-        if (d := extract_date_from_folder(f.name))
-    ]
+def get_cache_entries() -> list[tuple[str, str]]:
+    """(sector, date_str) 목록. sector ''는 legacy(Y1 호환)."""
+    return ParquetCacheManager(CACHE_DIR).get_available_entries()
+
+
+@st.cache_data(show_spinner=False)
+def get_raw_entries() -> list[tuple[str, str]]:
+    """Raw 폴더 기준 (sector, date_str) 목록."""
+    return [(s, d) for s, d, _ in scan_data_folders_with_sector(DATAFILE_ROOT)]
 
 
 def _fmt(d: str) -> str:
     return f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
 
 
+def _fmt_sector_date(sector: str, date_str: str, cached: bool) -> str:
+    s = sector if sector else "Y1"
+    return f"{s} · {_fmt(date_str)}" + (" ✓" if cached else "  (미처리)")
+
+
 def _invalidate_cache() -> None:
     load_cached_data.clear()
     load_multi_date.clear()
-    get_cache_dates.clear()
-    get_raw_dates.clear()
+    get_cache_entries.clear()
+    get_raw_entries.clear()
     load_analytics_cached.clear()
 
 
@@ -146,52 +151,35 @@ def render_sidebar() -> Tuple[Optional[str], str]:
         """, unsafe_allow_html=True)
         st.divider()
 
-        # 날짜 선택
-        st.markdown('<div style="font-size:0.75rem;color:#8AAEC8;font-weight:600;letter-spacing:0.5px;margin-bottom:6px;">DATE MODE</div>', unsafe_allow_html=True)
+        # Sector · 날짜 선택 (Y1 / M15X 등 Sector별 장소·항목 구분)
+        st.markdown('<div style="font-size:0.75rem;color:#8AAEC8;font-weight:600;letter-spacing:0.5px;margin-bottom:6px;">SECTOR · DATE</div>', unsafe_allow_html=True)
 
-        date_mode = st.radio(
-            "분석 모드",
-            ["단일 날짜", "날짜 범위"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="date_mode",
-        )
+        cache_entries = get_cache_entries()
+        raw_entries   = get_raw_entries()
+        cache_set     = set(cache_entries)
+        # 실제 데이터가 있는 것만 표시: Raw 폴더 기준 (캐시만 있고 Raw 없는 항목 제외)
+        all_entries   = sorted(set(raw_entries), key=lambda x: (x[0], x[1]), reverse=True)
 
-        cache_dates = get_cache_dates()
-        raw_dates   = get_raw_dates()
-        all_dates   = sorted(set(cache_dates + raw_dates), reverse=True)
-
-        if not all_dates:
+        if not all_entries:
             st.warning("데이터 없음")
             st.caption("Datafile/ 폴더에 CSV를 추가해 주세요.")
             return None, "pipeline"
 
-        if date_mode == "단일 날짜":
-            selected_date = st.selectbox(
-                "날짜",
-                options=all_dates,
-                format_func=lambda d: _fmt(d) + (" ✓" if d in cache_dates else "  (미처리)"),
-                label_visibility="collapsed",
-                key="single_date_select",
-            )
-            if "date_range_selection" not in st.session_state:
-                st.session_state.date_range_selection = None
-        else:
-            asc_dates = sorted(set(cache_dates))
-            if len(asc_dates) < 2:
-                st.warning("날짜 범위 모드는 캐시된 날짜가 2개 이상 필요합니다.")
-                selected_date = all_dates[0] if all_dates else None
-            else:
-                range_sel = st.select_slider(
-                    "날짜 범위",
-                    options=asc_dates,
-                    value=(asc_dates[0], asc_dates[-1]),
-                    format_func=_fmt,
-                    label_visibility="collapsed",
-                    key="date_range_slider",
-                )
-                st.session_state.date_range_selection = range_sel
-                selected_date = asc_dates[-1]
+        def _label(entry: tuple) -> str:
+            s, d = entry
+            cached = (s or "", d) in cache_set or (s in (None, "", "Y1") and ("", d) in cache_set)
+            return _fmt_sector_date(s or "Y1", d, cached)
+
+        choice = st.selectbox(
+            "Sector · 날짜",
+            options=all_entries,
+            format_func=_label,
+            label_visibility="collapsed",
+            key="sector_date_select",
+        )
+        selected_sector = (choice[0] or None) if choice else None
+        selected_date   = choice[1] if choice else None
+        st.session_state["selected_sector"] = selected_sector
 
         st.divider()
 
@@ -238,11 +226,15 @@ def render_sidebar() -> Tuple[Optional[str], str]:
 
         st.divider()
 
-        # 캐시 정보
-        if selected_date in cache_dates:
+        # 캐시 정보 (Sector·날짜 일치 시, legacy 캐시는 Y1으로 인정)
+        cache_set = set(cache_entries)
+        _cached = (selected_sector or "", selected_date) in cache_set or (
+            selected_sector in (None, "", "Y1") and ("", selected_date) in cache_set
+        )
+        if _cached:
             mgr = ParquetCacheManager(CACHE_DIR)
             for info in mgr.get_cache_info():
-                if info["date"] == selected_date:
+                if info["date"] == selected_date and (info.get("sector") or "Y1") == (selected_sector or "Y1"):
                     st.markdown(f"""
                     <div style="background:rgba(39,174,96,0.12);border-radius:8px;padding:0.6rem 0.8rem;">
                         <div style="font-size:0.75rem;color:#8AAEC8;font-weight:600;">CACHE</div>
@@ -328,62 +320,75 @@ def main() -> None:
         st.stop()
 
     selected_date, selected_page = render_sidebar()
+    selected_sector = st.session_state.get("selected_sector")
 
     if selected_date is None:
         _render_landing()
         return
 
-    mgr = ParquetCacheManager(CACHE_DIR)
-    cache_dates = mgr.get_available_dates()
+    cache_entries_set = set(get_cache_entries())
+
+    def _is_cached(sector: Optional[str], date_str: str) -> bool:
+        if ((sector or "", date_str) in cache_entries_set):
+            return True
+        if sector in (None, "", "Y1") and ("", date_str) in cache_entries_set:
+            return True  # legacy 캐시(파일명에 sector 없음)를 Y1으로 인정
+        return False
 
     # ── Admin: Pipeline (CLOUD_MODE에서는 노출 안 함) ─────────────────
     if selected_page == "pipeline" and not CLOUD_MODE:
         from src.pages.pipeline import render as render_pipeline
-        render_pipeline(selected_date, DATAFILE_ROOT, CACHE_DIR, _invalidate_cache)
+        render_pipeline(selected_date, DATAFILE_ROOT, CACHE_DIR, _invalidate_cache, sector=selected_sector)
         return
 
-    # ── 캐시 미준비 시 → 파이프라인으로 안내 ────────────────────────
-    if selected_date not in cache_dates:
+    # ── 캐시 미준비 시 → 파이프라인으로 안내 (Sector·날짜 기준) ───────
+    if not _is_cached(selected_sector, selected_date):
         _render_need_process(selected_date)
         return
 
-    # ── 단일 날짜 데이터 로드 ────────────────────────────────────────
+    # ── 단일 날짜 데이터 로드 (Sector별 캐시) ──────────────────────────
     with st.spinner("데이터 로드 중..."):
-        df = load_cached_data(selected_date)
+        df = load_cached_data(selected_date, selected_sector)
 
     if df is None or df.empty:
         st.error("캐시 로드 실패. 파이프라인을 다시 실행해 주세요.")
         return
 
-    # ── 멀티 날짜 데이터 (현장 분석 → 추이 탭에서 사용) ─────────────
+    # ── 멀티 날짜 데이터 (현장 분석 추이 등, 동일 Sector만) ─────────────
+    mgr = ParquetCacheManager(CACHE_DIR)
+    sector_dates = sorted(
+        [d for s, d in get_cache_entries() if (s or "") == (selected_sector or "")],
+        reverse=True,
+    )
     date_range = st.session_state.get("date_range_selection")
     if date_range and len(date_range) == 2:
-        asc_dates = sorted(set(mgr.get_available_dates()))
-        dates_in_range = [d for d in asc_dates if date_range[0] <= d <= date_range[1]]
+        dates_in_range = [d for d in sector_dates if date_range[0] <= d <= date_range[1]]
     else:
-        dates_in_range = mgr.get_available_dates()
+        dates_in_range = [selected_date]  # 단일 날짜만 사용 (범위 선택 UI는 추후 추가 가능)
 
     df_multi = None
     if len(dates_in_range) > 1:
         with st.spinner("멀티 날짜 데이터 로드 중..."):
-            df_multi = load_multi_date(tuple(dates_in_range))
+            df_multi = load_multi_date(tuple(dates_in_range), selected_sector)
 
     # ── 페이지 라우팅 (5개 메인 + 3개 Admin) ────────────────────────
+    get_analytics_fn = lambda date_str, df: get_analytics(date_str, df, selected_sector)
+
     if selected_page == "journey_verify":
         from src.pages.journey_verify import render as render_journey_verify
         render_journey_verify(df)
 
     elif selected_page == "site_analysis":
         from src.pages.site_analysis import render as render_site_analysis
-        render_site_analysis(df, df_multi, CACHE_DIR, DATAFILE_ROOT, selected_date, get_analytics)
+        render_site_analysis(df, df_multi, CACHE_DIR, DATAFILE_ROOT, selected_date, get_analytics_fn)
 
     elif selected_page == "productivity_analysis":
         from src.pages.productivity_analysis import render as render_productivity
-        render_productivity(df, selected_date, get_analytics)
+        render_productivity(df, selected_date, get_analytics_fn)
 
     elif selected_page == "safety_analysis":
         from src.pages.safety_analysis import render as render_safety
-        render_safety(df, selected_date, get_analytics)
+        render_safety(df, selected_date, get_analytics_fn)
 
     elif selected_page == "future_preview":
         from src.pages.future_preview import render as render_future_preview

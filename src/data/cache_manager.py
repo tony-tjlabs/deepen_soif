@@ -134,7 +134,8 @@ class BaseCacheManager(ABC):
 class ParquetCacheManager(BaseCacheManager):
     """
     Parquet 파일 기반 캐시 관리자.
-    파일명: processed_YYYYMMDD.parquet
+    파일명: processed_YYYYMMDD.parquet (sector 없음) 또는 processed_{SECTOR}_YYYYMMDD.parquet
+    Sector별 장소가 다르므로 Y1 / M15X 등 구분 저장.
     """
 
     def __init__(self, cache_dir: Path) -> None:
@@ -145,27 +146,27 @@ class ParquetCacheManager(BaseCacheManager):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_path(self, date_str: str) -> Path:
-        """날짜 문자열로 캐시 파일 경로 생성."""
+    def _get_path(self, date_str: str, sector: Optional[str] = None) -> Path:
+        """날짜(및 Sector)로 캐시 파일 경로 생성. sector 없으면 기존 형식(processed_YYYYMMDD)."""
+        if sector:
+            return self.cache_dir / f"{CACHE_FILE_PREFIX}{sector}_{date_str}{CACHE_FILE_SUFFIX}"
         return self.cache_dir / f"{CACHE_FILE_PREFIX}{date_str}{CACHE_FILE_SUFFIX}"
 
-    def save(self, df: pd.DataFrame, date_str: str) -> bool:
+    def save(self, df: pd.DataFrame, date_str: str, sector: Optional[str] = None) -> bool:
         """
         DataFrame을 Parquet 파일로 저장.
-        스키마 버전(CACHE_SCHEMA_VERSION)을 Parquet 파일 메타데이터에 기록.
+        sector 있으면 processed_{sector}_{date}.parquet, 없으면 processed_{date}.parquet(기존 호환).
 
         Args:
             df: 저장할 DataFrame
             date_str: 날짜 문자열 (YYYYMMDD)
-
-        Returns:
-            저장 성공 여부
+            sector: Sector 코드 (Y1, M15X 등, None이면 기존 형식)
         """
         if df is None or df.empty:
             logger.warning(f"저장할 데이터 없음: {date_str}")
             return False
 
-        cache_path = self._get_path(date_str)
+        cache_path = self._get_path(date_str, sector)
         try:
             # 스키마 버전을 Parquet 커스텀 메타데이터로 저장
             table = pa.Table.from_pandas(df, preserve_index=False)
@@ -183,29 +184,31 @@ class ParquetCacheManager(BaseCacheManager):
             logger.error(f"캐시 저장 실패: {cache_path} - {e}")
             return False
 
-    def load(self, date_str: str) -> Optional[pd.DataFrame]:
+    def load(self, date_str: str, sector: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
         Parquet 캐시 파일 로드.
-        스키마 버전을 검증하고, 구 버전 캐시는 누락 컬럼을 기본값으로 보완한다.
-
-        버전 불일치 시 처리:
-          - 경고 로그 출력 (앱 실행은 계속)
-          - _REQUIRED_COLUMNS_V2에 정의된 누락 컬럼을 기본값으로 추가
-          - 재처리를 권장하는 메시지 출력
+        sector 있으면 processed_{sector}_{date}.parquet, 없으면 processed_{date}.parquet 먼저 시도.
 
         Args:
             date_str: 날짜 문자열 (YYYYMMDD)
-
-        Returns:
-            로드된 DataFrame, 실패 시 None
+            sector: Sector 코드 (None이면 기존 형식 파일만 로드)
         """
-        cache_path = self._get_path(date_str)
-        if not cache_path.exists():
-            logger.warning(f"캐시 파일 없음: {cache_path.name}")
-            return None
+        cache_path = self._get_path(date_str, sector)
+
+        # 1순위: 튜닝된 캐시(_tuned.parquet)가 있으면 그것을 우선 사용
+        tuned_path = cache_path.with_name(cache_path.stem + "_tuned" + cache_path.suffix)
+        if tuned_path.exists():
+            logger.info(f"튜닝된 캐시 사용: {tuned_path.name}")
+            cache_path = tuned_path
+        else:
+            # 2순위: 일반 캐시 (sector 있는 형식 → 없으면 기본 형식 재시도)
+            if not cache_path.exists() and sector:
+                cache_path = self._get_path(date_str, None)
+            if not cache_path.exists():
+                logger.warning(f"캐시 파일 없음: {cache_path.name}")
+                return None
 
         try:
-            # 메타데이터에서 스키마 버전 확인
             parquet_file = pq.read_table(cache_path)
             meta = parquet_file.schema.metadata or {}
             cached_version = meta.get(b"cache_schema_version", b"1").decode()
@@ -240,46 +243,40 @@ class ParquetCacheManager(BaseCacheManager):
             logger.error(f"캐시 로드 실패: {cache_path} - {e}")
             return None
 
-    def is_valid(self, date_str: str) -> bool:
-        """
-        캐시 파일 존재 및 비어있지 않은지 확인.
-
-        Args:
-            date_str: 날짜 문자열 (YYYYMMDD)
-
-        Returns:
-            유효하면 True
-        """
-        cache_path = self._get_path(date_str)
+    def is_valid(self, date_str: str, sector: Optional[str] = None) -> bool:
+        """캐시 파일 존재 및 비어있지 않은지 확인. sector 있으면 해당 파일만."""
+        cache_path = self._get_path(date_str, sector)
         if not cache_path.exists():
             return False
         return cache_path.stat().st_size > 0
 
     def get_available_dates(self) -> list[str]:
-        """
-        캐시 디렉토리에서 사용 가능한 날짜 목록 반환.
+        """사용 가능한 날짜 목록 (중복 제거, sector 무관). 기존 호환용."""
+        seen: set[str] = set()
+        for _s, d in self.get_available_entries():
+            seen.add(d)
+        return sorted(seen)
 
-        Returns:
-            날짜 문자열 목록 (오름차순, YYYYMMDD)
+    def get_available_entries(self) -> list[tuple[str, str]]:
         """
-        dates = []
+        캐시 디렉토리에서 (sector, date_str) 목록 반환.
+        파일명: processed_YYYYMMDD.parquet → ("", date), processed_Y1_20260225.parquet → ("Y1", "20260225")
+        """
+        entries: list[tuple[str, str]] = []
         for f in self.cache_dir.glob(f"{CACHE_FILE_PREFIX}*{CACHE_FILE_SUFFIX}"):
-            date_str = f.stem.replace(CACHE_FILE_PREFIX, "")
-            if len(date_str) == 8 and date_str.isdigit():
-                dates.append(date_str)
-        return sorted(dates)
+            stem = f.stem.replace(CACHE_FILE_PREFIX, "")
+            if len(stem) == 8 and stem.isdigit():
+                entries.append(("", stem))  # legacy: sector 없음
+            else:
+                parts = stem.split("_")
+                if len(parts) >= 2 and len(parts[-1]) == 8 and parts[-1].isdigit():
+                    sector = "_".join(parts[:-1])
+                    entries.append((sector, parts[-1]))
+        return sorted(set(entries), key=lambda x: (x[0], x[1]))
 
-    def delete(self, date_str: str) -> bool:
-        """
-        캐시 파일 삭제.
-
-        Args:
-            date_str: 날짜 문자열 (YYYYMMDD)
-
-        Returns:
-            삭제 성공 여부
-        """
-        cache_path = self._get_path(date_str)
+    def delete(self, date_str: str, sector: Optional[str] = None) -> bool:
+        """캐시 파일 삭제. sector 있으면 해당 파일만."""
+        cache_path = self._get_path(date_str, sector)
         try:
             if cache_path.exists():
                 cache_path.unlink()
@@ -290,15 +287,12 @@ class ParquetCacheManager(BaseCacheManager):
             return False
 
     def get_cache_info(self) -> list[dict]:
-        """
-        모든 캐시 파일의 정보 목록 반환.
-
-        Returns:
-            {date, path, size_kb, row_count} 딕셔너리 목록
-        """
+        """캐시 파일 정보 목록. get_available_entries() 기준."""
         info_list = []
-        for date_str in self.get_available_dates():
-            cache_path = self._get_path(date_str)
+        for sector, date_str in self.get_available_entries():
+            cache_path = self._get_path(date_str, sector or None)
+            if not cache_path.exists():
+                continue
             size_kb = cache_path.stat().st_size / 1024
             try:
                 df = pd.read_parquet(cache_path, columns=["시간(분)"])
@@ -306,6 +300,7 @@ class ParquetCacheManager(BaseCacheManager):
             except Exception:
                 row_count = -1
             info_list.append({
+                "sector": sector or "Y1",
                 "date": date_str,
                 "path": str(cache_path),
                 "size_kb": round(size_kb, 1),
@@ -315,13 +310,17 @@ class ParquetCacheManager(BaseCacheManager):
 
     # ─── 분석 결과 캐시 (배포 시 사전 생성, 대시보드는 읽기 전용) ─────────────────
 
-    def _analytics_meta_path(self, date_str: str) -> Path:
+    def _analytics_meta_path(self, date_str: str, sector: Optional[str] = None) -> Path:
+        if sector:
+            return self.cache_dir / f"{ANALYTICS_PREFIX}{sector}_{date_str}{ANALYTICS_META_SUFFIX}"
         return self.cache_dir / f"{ANALYTICS_PREFIX}{date_str}{ANALYTICS_META_SUFFIX}"
 
-    def _analytics_parquet_path(self, date_str: str, key: str) -> Path:
+    def _analytics_parquet_path(self, date_str: str, key: str, sector: Optional[str] = None) -> Path:
+        if sector:
+            return self.cache_dir / f"{ANALYTICS_PREFIX}{sector}_{date_str}_{key}.parquet"
         return self.cache_dir / f"{ANALYTICS_PREFIX}{date_str}_{key}.parquet"
 
-    def save_analytics(self, analytics_dict: dict, date_str: str) -> bool:
+    def save_analytics(self, analytics_dict: dict, date_str: str, sector: Optional[str] = None) -> bool:
         """
         지표 결과를 Parquet/JSON으로 저장.
         DataFrame은 개별 parquet, 그 외는 meta.json에 저장.
@@ -341,29 +340,28 @@ class ParquetCacheManager(BaseCacheManager):
         try:
             for key, value in analytics_dict.items():
                 if isinstance(value, pd.DataFrame):
-                    path = self._analytics_parquet_path(date_str, key)
+                    path = self._analytics_parquet_path(date_str, key, sector)
                     value.to_parquet(path, index=False)
                     logger.debug(f"분석 캐시 저장: {path.name}")
                 else:
                     meta[key] = _json_safe(value)
             if meta:
-                meta_path = self._analytics_meta_path(date_str)
+                meta_path = self._analytics_meta_path(date_str, sector)
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(meta, f, ensure_ascii=False, indent=0)
-                logger.info(f"분석 캐시 저장 완료: {ANALYTICS_PREFIX}{date_str} (meta + {len(analytics_dict) - len(meta)}개 DataFrame)")
+                logger.info(f"분석 캐시 저장 완료: {ANALYTICS_PREFIX}{sector or ''}{date_str} (meta + {len(analytics_dict) - len(meta)}개 DataFrame)")
             return True
         except Exception as e:
             logger.error(f"분석 캐시 저장 실패: {date_str} - {e}")
             return False
 
-    def load_analytics(self, date_str: str) -> Optional[dict]:
+    def load_analytics(self, date_str: str, sector: Optional[str] = None) -> Optional[dict]:
         """
-        저장된 지표 로드. 없으면 None.
-
-        Returns:
-            calc_soif_summary와 동일 구조 + worker_summary, company_summary
+        저장된 지표 로드. sector 있으면 analytics_{sector}_{date}_*, 없으면 기존 형식.
         """
-        meta_path = self._analytics_meta_path(date_str)
+        meta_path = self._analytics_meta_path(date_str, sector)
+        if not meta_path.exists() and sector:
+            meta_path = self._analytics_meta_path(date_str, None)
         if not meta_path.exists():
             return None
         result = {}
@@ -371,37 +369,49 @@ class ParquetCacheManager(BaseCacheManager):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             result.update(meta)
-            for path in self.cache_dir.glob(f"{ANALYTICS_PREFIX}{date_str}_*.parquet"):
-                key = path.stem.replace(f"{ANALYTICS_PREFIX}{date_str}_", "")
-                result[key] = pd.read_parquet(path)
+            # 메타와 쌍인 parquet 접두사 (예: analytics_20260225_ 또는 analytics_Y1_20260225_)
+            meta_stem = meta_path.stem.replace("_meta", "")
+            parquet_prefix = meta_stem + "_"
+            for path in self.cache_dir.glob(f"{parquet_prefix}*.parquet"):
+                key = path.stem.replace(parquet_prefix, "")
+                if key:
+                    result[key] = pd.read_parquet(path)
             if result:
-                logger.info(f"분석 캐시 로드: {ANALYTICS_PREFIX}{date_str} ({len([k for k in result if isinstance(result[k], pd.DataFrame)])}개 DataFrame)")
+                logger.info(f"분석 캐시 로드: {ANALYTICS_PREFIX}{sector or ''}{date_str}")
             return result if result else None
         except Exception as e:
             logger.error(f"분석 캐시 로드 실패: {date_str} - {e}")
             return None
 
-    def get_available_analytics_dates(self) -> list[str]:
-        """분석 캐시가 있는 날짜 목록."""
-        dates = []
+    def get_available_analytics_entries(self) -> list[tuple[str, str]]:
+        """분석 캐시 (sector, date) 목록. analytics_*_meta.json 파싱."""
+        entries: list[tuple[str, str]] = []
         for f in self.cache_dir.glob(f"{ANALYTICS_PREFIX}*{ANALYTICS_META_SUFFIX}"):
-            # stem 예: analytics_20260225_meta → 20260225
-            date_str = f.stem.replace(ANALYTICS_PREFIX, "").replace("_meta", "")
-            if len(date_str) == 8 and date_str.isdigit():
-                dates.append(date_str)
-        return sorted(dates)
+            stem = f.stem.replace(ANALYTICS_PREFIX, "").replace("_meta", "")
+            if len(stem) == 8 and stem.isdigit():
+                entries.append(("", stem))
+            elif "_" in stem:
+                parts = stem.split("_")
+                if len(parts) >= 2 and len(parts[-1]) == 8 and parts[-1].isdigit():
+                    entries.append(("_".join(parts[:-1]), parts[-1]))
+        return sorted(set(entries), key=lambda x: (x[0], x[1]))
+
+    def get_available_analytics_dates(self) -> list[str]:
+        """분석 캐시가 있는 날짜 목록 (sector 무관, 기존 호환)."""
+        return sorted(set(d for _, d in self.get_available_analytics_entries()))
 
 
 def load_analytics_or_compute(
     cache_mgr: ParquetCacheManager,
     date_str: str,
     df: pd.DataFrame,
+    sector: Optional[str] = None,
 ) -> dict:
     """
     분석 결과 로드. 없으면 전처리 DataFrame으로 계산하여 반환.
-    배포 환경에서는 캐시만 사용하므로 로컬에서 Pipeline 실행 후 캐시를 포함해 배포할 것.
+    sector 있으면 해당 Sector 캐시 우선.
     """
-    analytics = cache_mgr.load_analytics(date_str)
+    analytics = cache_mgr.load_analytics(date_str, sector)
     if analytics is not None:
         return analytics
     from src.metrics.aggregator import aggregate_by_worker, aggregate_by_company
@@ -417,23 +427,20 @@ def load_analytics_or_compute(
 def load_multi_date_cache(
     dates: list[str],
     cache_dir: Path,
+    sector: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    여러 날짜의 캐시를 합쳐서 반환.
-    날짜 컬럼(ProcessedColumns.DATE)이 반드시 포함된다.
-    누락 날짜는 경고 로그 후 스킵.
+    여러 날짜의 캐시를 합쳐서 반환. Sector별 캐시 사용.
 
     Args:
         dates: 로드할 날짜 목록 (YYYYMMDD)
         cache_dir: 캐시 디렉토리 경로
-
-    Returns:
-        병합된 DataFrame (빈 날짜 스킵)
+        sector: Sector (Y1, M15X 등). None이면 legacy 형식.
     """
     mgr = ParquetCacheManager(cache_dir)
     parts: list[pd.DataFrame] = []
     for d in dates:
-        df = mgr.load(d)
+        df = mgr.load(d, sector)
         if df is None or df.empty:
             logger.warning(f"멀티 날짜 로드 스킵 (캐시 없음): {d}")
             continue
@@ -537,44 +544,76 @@ def build_pipeline(
 ) -> Optional[pd.DataFrame]:
     """
     전체 데이터 파이프라인 실행.
-    Raw CSV → 전처리 → 캐시 저장 → 반환
+    Raw CSV → 전처리 → 캐시 저장( Sector별 파일명) → 반환.
+    폴더명에서 Sector 추출 (Y1, M15X 등) — Sector별 장소·항목이 다름.
 
-    Args:
-        data_folder: 날짜별 raw data 폴더 경로
-        cache_dir: 캐시 저장 디렉토리
-        date_str: 처리할 날짜 (YYYYMMDD)
-        force_rebuild: True이면 기존 캐시 무시하고 재처리
-
-    Returns:
-        처리된 DataFrame, 실패 시 None
+    Sector별 SSMP 디렉터리가 있을 때만 SSMP를 사용하고,
+    없으면 SSMP 없이 키워드 기반 분류만 사용한다.
+    (예: Datafile/ssmp_structure_Y1, Datafile/ssmp_structure_M15X)
     """
     from src.data.loader import load_date_folder
     from src.data.preprocessor import preprocess
+    from src.utils.time_utils import extract_sector_from_folder
+    from src.data.spatial_loader import SpatialContext
 
     cache_mgr = ParquetCacheManager(cache_dir)
+    sector = extract_sector_from_folder(data_folder.name) if data_folder else None
 
-    # 캐시 유효성 확인
-    if not force_rebuild and cache_mgr.is_valid(date_str):
-        logger.info(f"기존 캐시 사용: {date_str}")
-        return cache_mgr.load(date_str)
+    if not force_rebuild and cache_mgr.is_valid(date_str, sector):
+        logger.info(f"기존 캐시 사용: {sector or 'legacy'} {date_str}")
+        return cache_mgr.load(date_str, sector)
 
-    # Raw CSV 로드
-    logger.info(f"Raw CSV 처리 시작: {date_str}")
+    logger.info(f"Raw CSV 처리 시작: {sector or ''} {date_str}")
     raw_df = load_date_folder(data_folder)
     if raw_df is None or raw_df.empty:
         logger.error(f"Raw 데이터 로드 실패: {date_str}")
         return None
 
-    # 전처리
-    processed_df = preprocess(raw_df)
+    # ── Sector별 SSMP 디렉터리 결정 ─────────────────────────────────────
+    spatial_ctx = None
+    try:
+        data_root = data_folder.parent if data_folder else cache_dir.parent
+        ssmp_dir = None
+
+        # 1순위: Sector 전용 SSMP (예: ssmp_structure_M15X)
+        if sector:
+            cand = data_root / f"ssmp_structure_{sector}"
+            if cand.exists():
+                ssmp_dir = cand
+            else:
+                logger.warning(
+                    f"Sector={sector} 전용 SSMP 폴더 없음: {cand} → "
+                    "SSMP 없이 키워드 매칭만 사용"
+                )
+
+        # 2순위: 기본 SSMP (Sector 정보 없거나 Y1/legacy일 때만 사용)
+        if ssmp_dir is None and (not sector or sector == "Y1"):
+            cand_default = data_root / "ssmp_structure"
+            if cand_default.exists():
+                ssmp_dir = cand_default
+
+        if ssmp_dir is not None:
+            spatial_ctx = SpatialContext(ssmp_dir)
+            logger.info(
+                f"SSMP 로드 완료 (sector={sector or 'Y1'}): {ssmp_dir}"
+            )
+        else:
+            logger.info(
+                f"SSMP 폴더 없음 또는 Sector 불일치 (sector={sector or 'UNKNOWN'}) → "
+                "SSMP 없이 키워드 기반 분류만 사용"
+            )
+    except Exception as e:
+        logger.warning(f"SSMP 로드 중 오류 (sector={sector or 'UNKNOWN'}): {e}")
+        spatial_ctx = None
+
+    # 전처리 (Sector별 SSMP가 있으면 SpatialContext 사용)
+    processed_df = preprocess(raw_df, spatial_ctx=spatial_ctx)
     if processed_df is None or processed_df.empty:
         logger.error(f"전처리 실패: {date_str}")
         return None
 
-    # 캐시 저장
-    cache_mgr.save(processed_df, date_str)
+    cache_mgr.save(processed_df, date_str, sector)
 
-    # 분석 결과 캐시 생성 (대시보드 배포 시 읽기 전용으로 사용)
     try:
         from src.metrics.aggregator import aggregate_by_worker, aggregate_by_company
         from src.metrics.soif import calc_soif_summary
@@ -582,10 +621,9 @@ def build_pipeline(
             "worker_summary": aggregate_by_worker(processed_df, include_safety=True),
             "company_summary": aggregate_by_company(processed_df),
         }
-        soif = calc_soif_summary(processed_df)
-        analytics.update(soif)
-        cache_mgr.save_analytics(analytics, date_str)
+        analytics.update(calc_soif_summary(processed_df))
+        cache_mgr.save_analytics(analytics, date_str, sector)
     except Exception as e:
-        logger.warning(f"분석 캐시 저장 스킵 (대시보드에서 계산 사용): {e}")
+        logger.warning(f"분석 캐시 저장 스킵: {e}")
 
     return processed_df

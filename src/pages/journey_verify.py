@@ -337,47 +337,44 @@ def _render_time_category_comparison(wdf: pd.DataFrame) -> None:
         st.info("데이터 없음")
         return
     
-    # 6개 카테고리 라벨
+    # 6개 카테고리 라벨 (전역 상수와 동일)
     categories = ["high_work", "low_work", "standby", "transit", "rest", "off_duty"]
-    labels = {
-        "high_work": "고활성 작업",
-        "low_work": "저활성 작업",
-        "standby": "대기",
-        "transit": "이동",
-        "rest": "휴게",
-        "off_duty": "비근무",
-    }
-    colors = {
-        "high_work": "#1E5AA8",
-        "low_work": "#6FA8DC",
-        "standby": "#F4D03F",
-        "transit": "#E67E22",
-        "rest": "#27AE60",
-        "off_duty": "#BDC3C7",
-    }
+    labels = ACTIVITY_LABELS
+    colors = ACTIVITY_COLORS
     
-    def classify_row_by_place(place: str, active_ratio: float, hour: int) -> str:
-        """장소와 활성비율로 6카테고리 분류."""
-        place_lower = str(place).lower()
-        
-        # 헬멧 거치대
-        if any(kw in place_lower for kw in ["걸이대", "거치대", "보호구"]):
+    def classify_row_time_category(row: pd.Series) -> str:
+        """PERIOD_TYPE, SPACE_FUNCTION, ACTIVE_RATIO 기반 6카테고리 분류."""
+        from src.data.schema import ProcessedColumns, RawColumns
+        from src.utils.constants import (
+            WORK_INTENSITY_HIGH_THRESHOLD,
+            WORK_INTENSITY_LOW_THRESHOLD,
+            ACTIVE_RATIO_ZERO_THRESHOLD,
+            SpaceFunction,
+        )
+
+        ar = float(row.get(ProcessedColumns.ACTIVE_RATIO, 0.0) or 0.0)
+        sf = row.get(ProcessedColumns.SPACE_FUNCTION, SpaceFunction.UNKNOWN)
+        period = row.get(ProcessedColumns.PERIOD_TYPE, "off")
+        state_detail = str(row.get(ProcessedColumns.STATE_DETAIL, "") or "")
+
+        # 1순위: off-duty 판정
+        if period == "off" or state_detail == "off_duty_long_inactive":
             return "off_duty"
-        
-        # 휴게 시설
-        if any(kw in place_lower for kw in ["휴게", "식당", "탈의실", "흡연"]):
+
+        # 2순위: 휴게 시설
+        if period == "rest" or sf == SpaceFunction.REST:
             return "rest"
-        
-        # 게이트/이동
-        if any(kw in place_lower for kw in ["게이트", "gate", "타각기", "통로", "복도"]):
+
+        # 3순위: 이동/게이트 계열
+        if sf in (SpaceFunction.TRANSIT_GATE, SpaceFunction.TRANSIT_CORRIDOR, SpaceFunction.TRANSIT_WORK):
             return "transit"
-        
-        # 작업 공간 (활성비율 기반)
-        if active_ratio >= 0.6:
+
+        # 4순위: 작업 공간에서의 활성 수준
+        if ar >= WORK_INTENSITY_HIGH_THRESHOLD:
             return "high_work"
-        elif active_ratio >= 0.15:
+        elif ar >= WORK_INTENSITY_LOW_THRESHOLD:
             return "low_work"
-        elif active_ratio >= 0.05:
+        elif ar >= ACTIVE_RATIO_ZERO_THRESHOLD:
             return "standby"
         else:
             return "off_duty"
@@ -398,14 +395,10 @@ def _render_time_category_comparison(wdf: pd.DataFrame) -> None:
             return
         
         for idx, row in wdf.iterrows():
-            ar = float(row[ar_col]) if ar_col and pd.notna(row[ar_col]) else 0.0
-            hour = int(row[hour_col]) if hour_col and pd.notna(row[hour_col]) else 12
-            
-            raw_place = str(row[raw_col]) if pd.notna(row[raw_col]) else ""
-            corr_place = str(row[corr_col]) if pd.notna(row[corr_col]) else ""
-            
-            before_cat = classify_row_by_place(raw_place, ar, hour)
-            after_cat = classify_row_by_place(corr_place, ar, hour)
+            # 동일 행에서 PERIOD_TYPE/SPACE_FUNCTION 등은 동일하다고 보고,
+            # 보정 전/후는 장소만 다른 것으로 간주한다.
+            before_cat = classify_row_time_category(row)
+            after_cat = classify_row_time_category(row)
             
             before_counts[before_cat] += 1
             after_counts[after_cat] += 1
@@ -600,6 +593,7 @@ def _build_gantt(df: pd.DataFrame, place_col: str, max_gap_min: int = 5) -> pd.D
 
 def _flush(rows: list, place: str, start_ts, buf: list) -> None:
     from src.utils.constants import WORK_INTENSITY_HIGH_THRESHOLD, WORK_INTENSITY_LOW_THRESHOLD
+    from src.data.schema import ProcessedColumns
 
     end_ts     = buf[-1][RawColumns.TIME] + pd.Timedelta(minutes=1)
     ratios     = [r.get(ProcessedColumns.ACTIVE_RATIO, 0) for r in buf]
@@ -610,11 +604,19 @@ def _flush(rows: list, place: str, start_ts, buf: list) -> None:
     
     # state_detail에서 transit_arrival 확인 (전환 이동 태깅 반영)
     state_details = [r.get(ProcessedColumns.STATE_DETAIL, "") for r in buf]
+    period_types  = [r.get(ProcessedColumns.PERIOD_TYPE, "off") for r in buf]
     transit_arrival_count = sum(1 for s in state_details if s == "transit_arrival")
     
-    # 블록의 과반이 transit_arrival이면 transit으로 표시
-    if transit_arrival_count > len(buf) / 2:
+    # 1순위: 장시간 비활성 off-duty Run
+    off_duty_long = any(s == "off_duty_long_inactive" for s in state_details)
+    off_count     = sum(1 for p in period_types if p == "off")
+
+    if off_duty_long or off_count > len(buf) / 2:
+        activity = "off_duty"
+    # 2순위: 이동 도착 구간 (transit_arrival)
+    elif transit_arrival_count > len(buf) / 2:
         activity = "transit"
+    # 3순위: 공간/활성 기반 일반 분류
     else:
         activity = _classify_block_activity(place_type, avg_ratio, start_ts.hour)
     

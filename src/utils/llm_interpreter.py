@@ -13,6 +13,8 @@ Journey 보정 자체는 rule-based 유지 — LLM은 '해석'에만 사용.
 from __future__ import annotations
 import os
 import logging
+import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -502,3 +504,342 @@ else:
     def cached_anomaly_explanation(anomaly_frozen: tuple) -> str:
         anomaly = dict(anomaly_frozen)
         return generate_anomaly_explanation(anomaly)
+
+
+# ── 4. Run 단위 LLM 분류 (Journey 보정 보조용) ────────────────────────────────
+
+_INACTIVE_RUN_MIN_DURATION = 30   # 30분 이상 비활성이면 LLM 판단 대상
+_LLM_CONFIDENCE_THRESHOLD  = 0.65
+
+_VALID_LLM_LABELS = {
+    "off_duty",       # 비근무 (퇴근 후, 야간 대기 등)
+    "rest_facility",  # 실제 휴게 (휴게실 등 시설 이용)
+    "standby",        # 현장 대기 (작업 공간 정지)
+    "high_work",      # 고활성 작업
+    "low_work",       # 저활성 작업
+    "anomaly",        # 데이터 이상치
+}
+
+_LABEL_TO_PERIOD_TYPE = {
+    "off_duty":      "off",
+    "rest_facility": "rest",
+    "standby":       "work",
+    "high_work":     "work",
+    "low_work":      "work",
+    "anomaly":       "off",
+}
+
+
+def is_ambiguous_inactive_run(run: dict) -> bool:
+    """
+    이 Run이 LLM 판단이 필요한 '애매한 비활성 구간'인지 판별.
+    """
+    if run.get("avg_active_ratio", 1.0) >= 0.05:
+        return False
+
+    if run.get("duration_min", 0) < _INACTIVE_RUN_MIN_DURATION:
+        return False
+
+    place_type = str(run.get("place_type", "UNKNOWN"))
+    if place_type in ("HELMET_RACK", "REST"):
+        return False
+
+    if run.get("rule_label") == "off_duty" and 0 <= int(run.get("hour_start", 12)) < 6:
+        return False
+
+    return True
+
+
+def summarize_run_context(run: dict, journey_ctx: dict) -> str:
+    """Run 하나를 Claude에게 전달할 자연어 요약 텍스트로 변환."""
+    place       = run.get("place", "알 수 없음")
+    place_type  = run.get("place_type", "UNKNOWN")
+    start_time  = run.get("start_time", "?")
+    end_time    = run.get("end_time", "?")
+    duration    = run.get("duration_min", 0)
+    active_r    = float(run.get("avg_active_ratio", 0.0) or 0.0)
+    hour_start  = int(run.get("hour_start", 0) or 0)
+
+    worker      = journey_ctx.get("worker_name", "작업자")
+    date_str    = journey_ctx.get("date", "")
+    shift_s     = journey_ctx.get("shift_start_hour")
+    shift_e     = journey_ctx.get("shift_end_hour")
+    main_places = journey_ctx.get("main_places", []) or []
+    prev_run    = journey_ctx.get("prev_run")
+    next_run    = journey_ctx.get("next_run")
+
+    if 0 <= hour_start < 6:
+        time_desc = "새벽 (00:00~06:00)"
+    elif 6 <= hour_start < 9:
+        time_desc = "오전 이른 시간"
+    elif 9 <= hour_start < 12:
+        time_desc = "오전"
+    elif 12 <= hour_start < 14:
+        time_desc = "점심 시간대"
+    elif 14 <= hour_start < 18:
+        time_desc = "오후"
+    elif 18 <= hour_start < 22:
+        time_desc = "저녁"
+    else:
+        time_desc = "밤 (22:00~00:00)"
+
+    shift_desc = ""
+    if shift_s is not None and shift_e is not None:
+        shift_desc = f"이 작업자의 오늘 추정 근무 시간은 {int(shift_s):02d}:00 ~ {int(shift_e):02d}:00입니다."
+    elif shift_s is not None:
+        shift_desc = f"이 작업자의 추정 출근 시간은 {int(shift_s):02d}:00입니다."
+
+    prev_desc = ""
+    if prev_run:
+        prev_desc = (
+            f"이 구간 직전에는 '{prev_run.get('place', '?')}'에서 "
+            f"{prev_run.get('duration_min', 0)}분 있었으며, "
+            f"활성비율은 {float(prev_run.get('avg_active_ratio', 0) or 0):.2f}였습니다."
+        )
+
+    next_desc = ""
+    if next_run:
+        next_desc = (
+            f"이 구간 직후에는 '{next_run.get('place', '?')}'에서 "
+            f"{next_run.get('duration_min', 0)}분 있었으며, "
+            f"활성비율은 {float(next_run.get('avg_active_ratio', 0) or 0):.2f}였습니다."
+        )
+
+    main_places_str = ", ".join(map(str, main_places[:5])) if main_places else "정보 없음"
+
+    summary = f"""
+건설현장 BLE 위치 데이터 분석 — 구간 분류 요청
+
+[분석 대상 구간]
+- 작업자: {worker}
+- 날짜: {date_str}
+- 구간 시간: {start_time} ~ {end_time} ({duration}분, {time_desc})
+- 장소: {place} (장소 유형: {place_type})
+- 평균 활성비율: {active_r:.3f} (0.0 = 완전 비활성, 1.0 = 최고 활성)
+
+[전후 맥락]
+{prev_desc}
+{next_desc}
+
+[하루 전체 맥락]
+- 오늘 주로 머문 장소들: {main_places_str}
+- {shift_desc}
+
+[판단 기준 참고]
+- 헬멧 걸이대(HELMET_RACK)는 퇴근/미출근 상태입니다.
+- 휴게실(REST)은 실제 휴게 공간입니다.
+- 타각기/게이트(GATE)는 출퇴근 기록 장치 주변입니다.
+- 장시간(2시간 이상) 완전 비활성(0.0)이 작업공간·게이트 주변에서 발생하면,
+  실제 휴게보다는 비근무(off_duty) 가능성이 매우 높습니다.
+- 30분~1시간 비활성은 점심·정규 휴게일 수 있습니다.
+
+아래 중 하나로 이 구간을 분류해주세요:
+  off_duty       → 비근무 (퇴근 후 거치, 야간 비근무, 미출근 등)
+  rest_facility  → 실제 휴게 시설 이용 (점심, 휴식)
+  standby        → 현장 대기 (작업공간이지만 정지 — 지시·자재 대기)
+  high_work      → 고활성 작업 (활발한 신체 활동)
+  low_work       → 저활성 작업 (감독, 측량 등)
+  anomaly        → 데이터 이상치 (센서 오류 의심)
+
+반드시 JSON으로만 응답하세요 (다른 텍스트 없이):
+{{"label": "<레이블>", "reason": "<한 문장 이유>", "confidence": <0.0~1.0>}}
+""".strip()
+
+    return summary
+
+
+def classify_run_with_llm(run: dict, journey_ctx: dict) -> dict:
+    """
+    애매한 비활성 Run을 Claude API로 분류.
+    """
+    fallback = {
+        "label":       "off_duty",
+        "reason":      "장시간 비활성으로 비근무 추정 (규칙 기반)",
+        "confidence":  0.6,
+        "period_type": "off",
+        "source":      "rule_fallback",
+    }
+
+    if not is_llm_available():
+        logger.debug("LLM unavailable — rule fallback for run classification")
+        return fallback
+
+    client = _get_client()
+    if client is None:
+        return fallback
+
+    try:
+        prompt = summarize_run_context(run, journey_ctx)
+        msg = client.messages.create(
+            model=_MODEL,
+            max_tokens=200,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = msg.content[0].text.strip()
+
+        # 코드 블록 마커 제거
+        cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+
+        # 1차 시도: 전체 문자열을 JSON 으로 해석
+        try:
+            result = json.loads(cleaned)
+        except Exception:
+            # 2차 시도: 문자열 안에서 {...} 블록만 추출해서 JSON 파싱
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                raise
+            snippet = match.group(0)
+            result = json.loads(snippet)
+
+        label = result.get("label", "off_duty")
+        reason = result.get("reason", "")
+        try:
+            confidence = float(result.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+
+        if label not in _VALID_LLM_LABELS:
+            logger.warning(f"LLM returned invalid label '{label}' — using off_duty fallback")
+            label = "off_duty"
+
+        if confidence < _LLM_CONFIDENCE_THRESHOLD:
+            logger.debug(f"LLM confidence {confidence:.2f} below threshold — rule fallback")
+            fallback["reason"] = f"LLM 신뢰도 낮음({confidence:.0%}) — 비근무 추정"
+            return fallback
+
+        return {
+            "label":       label,
+            "reason":      reason,
+            "confidence":  confidence,
+            "period_type": _LABEL_TO_PERIOD_TYPE.get(label, "off"),
+            "source":      "llm",
+        }
+    except Exception as e:
+        logger.warning(f"classify_run_with_llm failed: {e}")
+        return fallback
+
+
+# ── 5. Journey 전체 LLM 해석 (출퇴근 시점 추천) ─────────────────────────────
+
+def _build_journey_shift_prompt(journey_ctx: dict) -> str:
+    """
+    하루 Journey 컨텍스트를 기반으로 출퇴근 시점 해석을 요청하는 프롬프트 생성.
+
+    기대 응답 형식 (JSON):
+      {
+        "clock_in": "HH:MM",
+        "clock_out": "HH:MM",
+        "reason": "<한 문장 설명>"
+      }
+    """
+    worker = journey_ctx.get("worker_name", "작업자")
+    date_str = journey_ctx.get("date", "")
+    company = journey_ctx.get("company", "")
+    token = journey_ctx.get("journey_token", "")
+    stats = journey_ctx.get("stats", {}) or {}
+    legend = journey_ctx.get("space_legend", "")
+
+    total_min = stats.get("total_recorded_min", 0)
+    run_count = stats.get("run_count", 0)
+    longest_inactive = stats.get("longest_inactive_min", 0)
+
+    prompt = f"""
+당신은 건설현장 작업 분석 전문가입니다.
+하루 전체 BLE 위치/활동 데이터가 Run 단위로 압축되어 제공됩니다.
+이 여정을 보고 이 작업자의 '실제 근무 구간'이 어디인지 판단하세요.
+
+[작업자 정보]
+- 이름: {worker}
+- 소속: {company}
+- 날짜: {date_str}
+
+[데이터 요약]
+- 기록된 총 분(min): {int(total_min)}
+- Run 개수: {run_count}
+- 가장 긴 비활성 Run: {int(longest_inactive)}분
+
+[장소/활성도 범례]
+{legend}
+
+[하루 Journey (시간 순서)]
+{token}
+
+판단 기준:
+- 출근(clock_in)은 오늘 실제로 근무를 시작한 시점입니다.
+  - 새벽 짧은 꼬리(3~5분) 후 4시간 이상 완전 비활성인 구간은 전날 퇴근 꼬리로 간주합니다.
+  - GATE/RACK에서의 장시간 비활성(수 시간)은 퇴근 또는 비근무(off-duty)입니다.
+- 퇴근(clock_out)은 오늘의 마지막 실질적인 근무 블록이 끝나는 시점입니다.
+- 점심·짧은 휴게(30분~1시간)는 근무 시간 내부로 간주합니다.
+- 장시간(4시간 이상) 비활성 구간은 근무와 근무 사이의 'off-duty'일 가능성이 큽니다.
+
+출력 형식:
+- 반드시 아래 JSON 형태로만, 다른 텍스트 없이 응답하세요.
+- 시간은 24시간제 HH:MM 형식으로만 적어주세요 (초 단위 금지).
+
+예시:
+{{"clock_in": "07:30", "clock_out": "18:10", "reason": "07:30 이후 GATE 통과 후 지속적인 작업 구간이 있고, 18시 이후는 RACK에서 장시간 비활성이라 퇴근으로 판단했습니다."}}
+
+이제 위 형식으로 실제 값을 채워서 답변하세요.
+""".strip()
+    return prompt
+
+
+def interpret_journey_shift(journey_ctx: dict) -> dict:
+    """
+    Journey 컨텍스트를 Claude에 보내 출퇴근 시점을 HH:MM 형식으로 받는다.
+
+    Returns:
+        {
+          "clock_in": "HH:MM",
+          "clock_out": "HH:MM",
+          "reason": str,
+        }
+        실패 시 {} 반환.
+    """
+    if not is_llm_available():
+        return {}
+
+    client = _get_client()
+    if client is None:
+        return {}
+
+    try:
+        prompt = _build_journey_shift_prompt(journey_ctx)
+        msg = client.messages.create(
+            model=_MODEL,
+            max_tokens=200,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = msg.content[0].text.strip()
+
+        cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(cleaned)
+
+        clock_in = str(result.get("clock_in", "")).strip()
+        clock_out = str(result.get("clock_out", "")).strip()
+        reason = str(result.get("reason", "")).strip()
+
+        def _is_hhmm(s: str) -> bool:
+            if len(s) != 5 or s[2] != ":":
+                return False
+            hh, mm = s.split(":", 1)
+            if not (hh.isdigit() and mm.isdigit()):
+                return False
+            h, m = int(hh), int(mm)
+            return 0 <= h <= 23 and 0 <= m <= 59
+
+        if not (_is_hhmm(clock_in) and _is_hhmm(clock_out)):
+            logger.warning(f"LLM journey shift 결과 HH:MM 형식 불일치: {result}")
+            return {}
+
+        return {
+            "clock_in": clock_in,
+            "clock_out": clock_out,
+            "reason": reason,
+        }
+    except Exception as e:
+        logger.warning(f"interpret_journey_shift 실패: {e}")
+        return {}
+
