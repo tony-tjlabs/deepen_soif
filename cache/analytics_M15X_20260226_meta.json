@@ -1,0 +1,60 @@
+{
+"site_ewi": {
+"ewi": 0.559,
+"high_work_min": 1668,
+"low_work_min": 301,
+"standby_min": 5,
+"transit_min": 0,
+"rest_min": 37,
+"off_duty_min": 362,
+"onsite_min": 2812,
+"work_duration_min": 3253,
+"recorded_min": 2450,
+"gap_min": 803
+},
+"site_ofi": {
+"ofi": 0.0021,
+"standby_min": 5,
+"transit_min": 0,
+"excess_transit_min": 0.0,
+"onsite_min": 2341,
+"transit_pct": 0.0
+},
+"avg_cre": 0.3106,
+"max_cre": 0.3788,
+"worker_count": 4,
+"zone_count": 11,
+"flow_edge_count": 30,
+"top_bottlenecks": [
+{
+"zone": "공사현장",
+"bottleneck_score": 1.0,
+"flow_imbalance": 1,
+"standby_total": 2
+},
+{
+"zone": "FAB 건너 흡연실",
+"bottleneck_score": 0.6,
+"flow_imbalance": -1,
+"standby_total": 0
+},
+{
+"zone": "FAB 5F (전체)",
+"bottleneck_score": 0.4,
+"flow_imbalance": 0,
+"standby_total": 2
+},
+{
+"zone": "FAB 7F (전체)",
+"bottleneck_score": 0.2,
+"flow_imbalance": 0,
+"standby_total": 1
+},
+{
+"zone": "FAB 6F (전체)",
+"bottleneck_score": 0.0,
+"flow_imbalance": 0,
+"standby_total": 0
+}
+]
+}

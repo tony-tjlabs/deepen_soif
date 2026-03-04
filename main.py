@@ -114,8 +114,11 @@ def get_cache_entries() -> list[tuple[str, str]]:
 
 @st.cache_data(show_spinner=False)
 def get_raw_entries() -> list[tuple[str, str]]:
-    """Raw 폴더 기준 (sector, date_str) 목록."""
-    return [(s, d) for s, d, _ in scan_data_folders_with_sector(DATAFILE_ROOT)]
+    """
+    배포(Release) 빌드에서는 Raw 폴더를 사용하지 않는다.
+    데이터 소스는 항상 cache/processed_*.parquet 기준으로만 동작한다.
+    """
+    return []
 
 
 def _fmt(d: str) -> str:
@@ -155,14 +158,13 @@ def render_sidebar() -> Tuple[Optional[str], str]:
         st.markdown('<div style="font-size:0.75rem;color:#8AAEC8;font-weight:600;letter-spacing:0.5px;margin-bottom:6px;">SECTOR · DATE</div>', unsafe_allow_html=True)
 
         cache_entries = get_cache_entries()
-        raw_entries   = get_raw_entries()
         cache_set     = set(cache_entries)
-        # 실제 데이터가 있는 것만 표시: Raw 폴더 기준 (캐시만 있고 Raw 없는 항목 제외)
-        all_entries   = sorted(set(raw_entries), key=lambda x: (x[0], x[1]), reverse=True)
 
+        # 배포 버전: 항상 캐시 기준으로만 Sector·날짜 목록 생성
+        all_entries = sorted(set(cache_entries), key=lambda x: (x[0], x[1]), reverse=True)
         if not all_entries:
             st.warning("데이터 없음")
-            st.caption("Datafile/ 폴더에 CSV를 추가해 주세요.")
+            st.caption("cache/ 폴더에 processed_*.parquet와 analytics_* 파일을 포함해 주세요.")
             return None, "pipeline"
 
         def _label(entry: tuple) -> str:

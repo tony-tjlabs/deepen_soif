@@ -1,0 +1,60 @@
+{
+"site_ewi": {
+"ewi": 0.5041,
+"high_work_min": 1842,
+"low_work_min": 127,
+"standby_min": 0,
+"transit_min": 8,
+"rest_min": 34,
+"off_duty_min": 575,
+"onsite_min": 3119,
+"work_duration_min": 3780,
+"recorded_min": 2544,
+"gap_min": 1236
+},
+"site_ofi": {
+"ofi": 0.0,
+"standby_min": 0,
+"transit_min": 8,
+"excess_transit_min": 0.0,
+"onsite_min": 2370,
+"transit_pct": 0.0034
+},
+"avg_cre": 0.3356,
+"max_cre": 0.4288,
+"worker_count": 5,
+"zone_count": 20,
+"flow_edge_count": 47,
+"top_bottlenecks": [
+{
+"zone": "본진 타각기 출구",
+"bottleneck_score": 0.6,
+"flow_imbalance": -1.0,
+"standby_total": 0
+},
+{
+"zone": "지원 4BL",
+"bottleneck_score": 0.6,
+"flow_imbalance": 1.0,
+"standby_total": 0
+},
+{
+"zone": "지원_타각기",
+"bottleneck_score": 0.6,
+"flow_imbalance": 1.0,
+"standby_total": 0
+},
+{
+"zone": "WWT 2F (전체)",
+"bottleneck_score": 0.6,
+"flow_imbalance": -1.0,
+"standby_total": 0
+},
+{
+"zone": "FAB 4F (전체)",
+"bottleneck_score": 0.0,
+"flow_imbalance": 0.0,
+"standby_total": 0
+}
+]
+}
