@@ -189,6 +189,33 @@ def extract_date_from_folder(folder_name: str) -> Optional[str]:
         return None
 
 
+def extract_sector_from_folder(folder_name: str) -> Optional[str]:
+    """
+    데이터 폴더명에서 Sector 추출.
+    예: "Y1_Worker_TWard_20260225" → "Y1", "M15X_Worker_TWard_20260226" → "M15X"
+    Sector별로 장소·SSMP가 다르므로 구분 필요.
+
+    Args:
+        folder_name: 데이터 폴더명
+
+    Returns:
+        Sector 코드 (예: Y1, M15X), 추출 실패 시 None
+    """
+    try:
+        normalized = folder_name.strip().replace(" ", "_")
+        parts = [p for p in normalized.split("_") if p]
+        if not parts:
+            return None
+        # 첫 번째 부분이 Worker/TWard/숫자(날짜)가 아니면 Sector로 간주
+        first = parts[0].upper()
+        if first in ("WORKER", "TWARD") or (len(first) == 8 and first.isdigit()):
+            return None
+        return parts[0]
+    except Exception as e:
+        logger.warning(f"Sector 추출 실패: '{folder_name}' - {e}")
+        return None
+
+
 def format_duration(minutes: float) -> str:
     """
     분 단위 시간을 "Xh Ym" 형식 문자열로 변환.

@@ -12,7 +12,7 @@ import pandas as pd
 
 from src.data.schema import RawColumns, ProcessedColumns, RAW_CSV_DTYPES, validate_raw_df
 from src.utils.constants import CSV_ENCODING, DATETIME_FORMAT, DATA_FOLDER_PREFIX
-from src.utils.time_utils import extract_date_from_folder
+from src.utils.time_utils import extract_date_from_folder, extract_sector_from_folder
 
 logger = logging.getLogger(__name__)
 
@@ -149,36 +149,45 @@ def load_date_folder(folder_path: Path) -> Optional[pd.DataFrame]:
 
 def scan_data_folders(base_path: Path) -> list[Path]:
     """
-    base_path 하위의 날짜별 데이터 폴더를 자동으로 스캔하여 반환.
-    폴더명 패턴: Y1_Worker_TWard_YYYYMMDD (공백 포함 가능)
+    base_path 하위의 날짜별 데이터 폴더를 스캔.
+    Sector 구분: Y1_Worker_TWard_YYYYMMDD, M15X_Worker_TWard_YYYYMMDD 등
+    (Sector별 장소·SSMP가 다름 — 반환은 기존 호환용 Path 목록, sector 정보는 scan_data_folders_with_sector 사용)
+    """
+    entries = scan_data_folders_with_sector(base_path)
+    return [p for _, __, p in entries]
 
-    Args:
-        base_path: Datafile 루트 폴더 경로
+
+def scan_data_folders_with_sector(base_path: Path) -> list[tuple[str, str, Path]]:
+    """
+    base_path 하위의 데이터 폴더를 Sector·날짜와 함께 스캔.
+    폴더명 패턴: {SECTOR}_Worker_TWard_YYYYMMDD (예: Y1, M15X)
 
     Returns:
-        날짜별 데이터 폴더 경로 목록 (날짜 오름차순)
+        (sector, date_str, folder_path) 목록, sector·날짜 오름차순
     """
     if not base_path.exists():
         logger.error(f"데이터 루트 폴더 없음: {base_path}")
         return []
 
-    folders = []
-    for item in base_path.iterdir():
-        if item.is_dir():
-            # 공백/연속 언더스코어 제거 후 패턴 확인
-            # "Y1 _Worker_TWard_20260225" → "Y1_Worker_TWard_20260225"
-            import re
-            normalized = re.sub(r"[\s_]+", "_", item.name)
-            if normalized.startswith(DATA_FOLDER_PREFIX):
-                date_str = extract_date_from_folder(item.name)
-                if date_str:
-                    folders.append((date_str, item))
+    import re
 
-    # 날짜 오름차순 정렬
-    folders.sort(key=lambda x: x[0])
-    result = [p for _, p in folders]
-    logger.info(f"데이터 폴더 스캔: {len(result)}개 발견 ({base_path})")
-    return result
+    entries: list[tuple[str, str, Path]] = []
+    for item in base_path.iterdir():
+        if not item.is_dir():
+            continue
+        normalized = re.sub(r"[\s_]+", "_", item.name)
+        # Worker + TWard + 8자리 날짜 포함 폴더만 (Y1, M15X 등 Sector 지원)
+        if "Worker" not in normalized or "TWard" not in normalized:
+            if not normalized.startswith(DATA_FOLDER_PREFIX):
+                continue
+        date_str = extract_date_from_folder(item.name)
+        sector = extract_sector_from_folder(item.name)
+        if date_str and sector:
+            entries.append((sector, date_str, item))
+
+    entries.sort(key=lambda x: (x[0], x[1]))
+    logger.info(f"데이터 폴더 스캔: {len(entries)}개 (Sector·날짜) 발견 ({base_path})")
+    return entries
 
 
 def get_available_dates(base_path: Path) -> list[str]:
@@ -200,19 +209,22 @@ def get_available_dates(base_path: Path) -> list[str]:
     return dates
 
 
-def get_folder_for_date(base_path: Path, date_str: str) -> Optional[Path]:
+def get_folder_for_date(base_path: Path, date_str: str, sector: Optional[str] = None) -> Optional[Path]:
     """
-    날짜 문자열에 해당하는 데이터 폴더 경로 반환.
+    날짜(및 선택적 Sector)에 해당하는 데이터 폴더 경로 반환.
 
     Args:
-        base_path: Datafile 루트 폴더 경로
+        base_path: Datafile 루트 경로
         date_str: 날짜 문자열 (YYYYMMDD)
+        sector: Sector 코드 (None이면 첫 번째 매칭 폴더)
 
     Returns:
         폴더 경로, 없으면 None
     """
-    folders = scan_data_folders(base_path)
-    for folder in folders:
-        if extract_date_from_folder(folder.name) == date_str:
+    entries = scan_data_folders_with_sector(base_path)
+    for s, d, folder in entries:
+        if d != date_str:
+            continue
+        if sector is None or s == sector:
             return folder
     return None
