@@ -46,26 +46,36 @@ _STATIC_RISK: dict[str, float] = {
 
 def detect_work_shift(df: pd.DataFrame) -> dict:
     """
-    하루 Journey에서 출근/퇴근 시점을 감지.
-    
-    출근 시점: 헬멧 거치대(RACK)에서 처음 벗어나는 시점
-    퇴근 시점: 마지막으로 헬멧 거치대(RACK)로 돌아오는 시점
-    
-    로직:
-    1. 시간순 정렬
-    2. HELMET_RACK이 아닌 첫 번째 행 = 출근 (clock_in)
-    3. HELMET_RACK이 아닌 마지막 행 = 퇴근 직전 (last_active)
-    4. last_active 이후 HELMET_RACK 행 = 퇴근 (clock_out)
-    
+    하루 Journey에서 출퇴근 시점을 감지.
+
+    철학:
+      - 개별 시점이 아니라, 하루 전체 Journey(문장)를 보고
+        "실제 근무 블록"이 어디인지 찾는다.
+      - 활성/비활성 패턴과 긴 공백(야간 off-duty) 을 이용해
+        전날 퇴근 꼬리와 당일 근무를 구분한다.
+
+    로직 개요:
+      1. 시간순 정렬
+      2. ACTIVE_RATIO 기반으로 "활동 Run" 목록 생성
+         - 후보: ACTIVE_RATIO ≥ WORK_INTENSITY_LOW_THRESHOLD 이고,
+                 PLACE_TYPE != HELMET_RACK
+      3. Run 들을 시간 순으로 정렬한 뒤,
+         - Run 사이의 간격이 LONG_INACTIVE_GAP_MIN (기본 240분)보다 크면
+           서로 다른 Shift로 분리
+         - 각 Shift별로 고/저활성 시간을 합산
+      4. 가장 높은 활동 시간을 가진 Shift를 "당일 근무"로 선택
+      5. 해당 Shift의 첫 Run 시작 시점을 출근(clock_in),
+         마지막 Run 끝 시점을 퇴근(clock_out)으로 사용
+
     Returns:
         {
             "clock_in_idx": int,      # 출근 시점 행 인덱스
             "clock_out_idx": int,     # 퇴근 시점 행 인덱스
             "clock_in_time": Timestamp,
             "clock_out_time": Timestamp,
-            "work_duration_min": int, # 출근~퇴근 사이 분
-            "pre_work_min": int,      # 출근 전 (거치대) 분
-            "post_work_min": int,     # 퇴근 후 (거치대) 분
+            "work_duration_min": int, # 출근~퇴근 사이 분 (행 기준)
+            "pre_work_min": int,      # 출근 전 행 수 (off-duty 분)
+            "post_work_min": int,     # 퇴근 후 행 수 (off-duty 분)
         }
     """
     if df.empty:
@@ -74,42 +84,234 @@ def detect_work_shift(df: pd.DataFrame) -> dict:
             "clock_in_time": None, "clock_out_time": None,
             "work_duration_min": 0, "pre_work_min": 0, "post_work_min": 0,
         }
-    
+
     sorted_df = df.sort_values(RawColumns.TIME).reset_index(drop=True)
-    pt = sorted_df[ProcessedColumns.PLACE_TYPE].fillna("UNKNOWN").values
-    times = sorted_df[RawColumns.TIME].values
+    times = pd.to_datetime(sorted_df[RawColumns.TIME].values)
     n = len(sorted_df)
-    
-    # 출근 시점: HELMET_RACK이 아닌 첫 번째 행
-    clock_in_idx = 0
+
+    # ── (옵션) LLM 기반 출퇴근 시점 해석 ────────────────────────────────────
+    # 배포 안정성을 위해 현재는 rule-based 결과만 사용.
+    USE_LLM_SHIFT = False
+    if USE_LLM_SHIFT and is_llm_available():
+        try:
+            worker_name = str(sorted_df[RawColumns.WORKER].iloc[0]) if RawColumns.WORKER in sorted_df.columns else "작업자"
+            date_str = str(sorted_df[ProcessedColumns.DATE].iloc[0]) if ProcessedColumns.DATE in sorted_df.columns else ""
+            company = str(sorted_df[RawColumns.COMPANY].iloc[0]) if RawColumns.COMPANY in sorted_df.columns else ""
+
+            j_ctx = build_journey_context(sorted_df, worker_name=worker_name, date_str=date_str, company=company)
+            llm_res = interpret_journey_shift(j_ctx) if j_ctx else {}
+
+            if llm_res:
+                def _find_idx(hhmm: str, is_start: bool) -> Optional[int]:
+                    try:
+                        base = pd.to_datetime(f"{date_str} {hhmm}") if date_str else pd.to_datetime(hhmm)
+                    except Exception:
+                        return None
+                    if is_start:
+                        mask = times >= base
+                        if not mask.any():
+                            return 0
+                        return int(mask.argmax())
+                    else:
+                        mask = times <= base
+                        if not mask.any():
+                            return n - 1
+                        return int(mask.nonzero()[0][-1])
+
+                ci_idx = _find_idx(llm_res["clock_in"], True)
+                co_idx = _find_idx(llm_res["clock_out"], False)
+
+                if ci_idx is not None and co_idx is not None and 0 <= ci_idx < n and 0 <= co_idx < n and ci_idx <= co_idx:
+                    clock_in_time = times[ci_idx]
+                    clock_out_time = times[co_idx]
+                    work_duration_min = co_idx - ci_idx + 1
+                    pre_work_min = ci_idx
+                    post_work_min = n - co_idx - 1
+                    return {
+                        "clock_in_idx": ci_idx,
+                        "clock_out_idx": co_idx,
+                        "clock_in_time": clock_in_time,
+                        "clock_out_time": clock_out_time,
+                        "work_duration_min": work_duration_min,
+                        "pre_work_min": pre_work_min,
+                        "post_work_min": post_work_min,
+                    }
+        except Exception as e:
+            logger.warning(f"LLM 기반 출퇴근 시점 해석 실패, rule-based로 대체: {e}")
+
+    # ── 1) 활성/비활성 기반 분 단위 Run 생성 ──────────────────────────────
+    pt = sorted_df[ProcessedColumns.PLACE_TYPE].fillna("UNKNOWN").values
+    ratio = sorted_df[ProcessedColumns.ACTIVE_RATIO].fillna(0).values
+
+    is_work_space = (pt != "HELMET_RACK") & (pt != "REST")
+
+    strict_active = (ratio >= WORK_INTENSITY_LOW_THRESHOLD) & is_work_space
+    strict_active_count = int(strict_active.sum())
+
+    if strict_active_count >= 30:
+        base_candidate = strict_active
+    else:
+        # 엄격 기준으로는 활동 분이 너무 적으면, ratio>0 인 모든 분을 후보로 사용
+        base_candidate = (ratio > 0) & is_work_space
+
+    # ── 1-1) 계층적 판정: off-duty 구간으로 하루를 여러 Segment로 나누고,
+    #       각 Segment의 활동 점수를 비교해 가장 큰 Segment를 근무로 선택 ──
+    is_candidate = base_candidate.copy()
+    candidate_indices = np.where(base_candidate)[0]
+
+    if candidate_indices.size > 0:
+        LONG_OFF_MIN = 240      # 4시간
+        OFF_RATIO_MIN = 0.9     # 창 안의 90% 이상이 완전 비활성이면 off-duty 창
+
+        # off-duty 창의 중심 인덱스를 separator 후보로 수집
+        separators: list[int] = []
+        first_active_idx = int(candidate_indices[0])
+        s_start = first_active_idx + 1
+        for s in range(s_start, n):
+            e = s + LONG_OFF_MIN - 1
+            if e >= n:
+                break
+            window = ratio[s:e + 1]
+            length = e - s + 1
+            off_mask = window < ACTIVE_RATIO_ZERO_THRESHOLD
+            off_ratio = off_mask.sum() / float(length)
+            if off_ratio >= OFF_RATIO_MIN:
+                mid = (s + e) // 2
+                separators.append(mid)
+
+        # separator 들을 연속 구간으로 압축 (하나의 off-duty 밴드)
+        bands: list[tuple[int, int]] = []
+        if separators:
+            sep_sorted = sorted(separators)
+            band_start = sep_sorted[0]
+            prev = sep_sorted[0]
+            for idx in sep_sorted[1:]:
+                if idx == prev + 1:
+                    prev = idx
+                else:
+                    bands.append((band_start, prev))
+                    band_start = idx
+                    prev = idx
+            bands.append((band_start, prev))
+
+        # bands 를 기준으로 Segment 구간 생성
+        segments: list[tuple[int, int]] = []
+        if bands:
+            prev_end = -1
+            for b_start, b_end in bands:
+                seg_start = prev_end + 1
+                seg_end = b_start - 1
+                if seg_start <= seg_end:
+                    segments.append((seg_start, seg_end))
+                prev_end = b_end
+            # 마지막 Segment
+            if prev_end + 1 <= n - 1:
+                segments.append((prev_end + 1, n - 1))
+        else:
+            # off-duty 밴드가 없으면 하루 전체를 하나의 Segment 로 본다.
+            segments.append((0, n - 1))
+
+        # 각 Segment 에 대해, base_candidate 가 True 인 분들의 ACTIVE_RATIO 합을 점수로 계산
+        best_seg = None
+        best_score = -1.0
+        for seg_start, seg_end in segments:
+            idxs = candidate_indices[(candidate_indices >= seg_start) & (candidate_indices <= seg_end)]
+            if idxs.size == 0:
+                continue
+            score = float(ratio[idxs].clip(min=0).sum())
+            if score > best_score:
+                best_score = score
+                best_seg = (seg_start, seg_end)
+
+        if best_seg is not None:
+            seg_start, seg_end = best_seg
+            idxs = candidate_indices[(candidate_indices >= seg_start) & (candidate_indices <= seg_end)]
+            if idxs.size > 0:
+                is_candidate[:] = False
+                is_candidate[idxs] = True
+
+    runs: list[dict] = []
+    current_start: Optional[int] = None
+
     for i in range(n):
-        if pt[i] != "HELMET_RACK":
-            clock_in_idx = i
-            break
-    
-    # 퇴근 시점: HELMET_RACK이 아닌 마지막 행 이후
-    # (마지막 활동 후 RACK으로 돌아오는 시점 또는 마지막 활동 시점)
-    last_active_idx = n - 1
-    for i in range(n - 1, -1, -1):
-        if pt[i] != "HELMET_RACK":
-            last_active_idx = i
-            break
-    
-    # 퇴근 시점은 마지막 활동 이후 첫 RACK 또는 마지막 활동 자체
-    clock_out_idx = last_active_idx
-    for i in range(last_active_idx + 1, n):
-        if pt[i] == "HELMET_RACK":
-            clock_out_idx = i
-            break
-    
-    clock_in_time = pd.Timestamp(times[clock_in_idx]) if clock_in_idx < n else None
-    clock_out_time = pd.Timestamp(times[clock_out_idx]) if clock_out_idx < n else None
-    
-    # 시간 계산
-    pre_work_min = clock_in_idx  # 출근 전 행 수 = 분
-    post_work_min = n - clock_out_idx - 1  # 퇴근 후 행 수 = 분
+        if is_candidate[i]:
+            if current_start is None:
+                current_start = i
+        else:
+            if current_start is not None:
+                runs.append({
+                    "start_idx": current_start,
+                    "end_idx": i - 1,
+                })
+                current_start = None
+
+    if current_start is not None:
+        runs.append({
+            "start_idx": current_start,
+            "end_idx": n - 1,
+        })
+
+    if not runs:
+        # 활동 Run 자체가 없으면, 전 구간을 하나의 블록으로 취급
+        clock_in_idx = 0
+        clock_out_idx = n - 1
+    else:
+        # ── 2) Run 들을 긴 비활성 공백 기준으로 Shift 로 클러스터 ────────────
+        LONG_OFF_MIN = 240  # 4시간 이상 공백이면 다른 Shift
+
+        shifts: list[dict] = []
+        current_shift = {
+            "runs": [],
+            "score": 0.0,
+        }
+        last_end_time = None
+
+        for run in runs:
+            s_idx = run["start_idx"]
+            e_idx = run["end_idx"]
+            start_t = times[s_idx]
+            end_t = times[e_idx]
+            length_min = e_idx - s_idx + 1
+
+            # Run 활동 점수: 길이 × 평균 활성비율
+            avg_r = float(ratio[s_idx:e_idx + 1].mean() if e_idx >= s_idx else 0.0)
+            run_score = length_min * max(avg_r, 0.0)
+
+            if last_end_time is None:
+                current_shift["runs"].append(run)
+                current_shift["score"] += run_score
+                last_end_time = end_t
+            else:
+                gap_min = (start_t - last_end_time).total_seconds() / 60.0
+                if gap_min >= LONG_OFF_MIN:
+                    shifts.append(current_shift)
+                    current_shift = {
+                        "runs": [run],
+                        "score": run_score,
+                    }
+                else:
+                    current_shift["runs"].append(run)
+                    current_shift["score"] += run_score
+                last_end_time = end_t
+
+        if current_shift["runs"]:
+            shifts.append(current_shift)
+
+        # ── 3) 활동 점수가 가장 큰 Shift를 근무 Shift로 선택 ────────────────
+        best_shift = max(shifts, key=lambda s: s["score"])
+        shift_runs = best_shift["runs"]
+        shift_runs.sort(key=lambda r: r["start_idx"])
+
+        clock_in_idx = shift_runs[0]["start_idx"]
+        clock_out_idx = shift_runs[-1]["end_idx"]
+
+    clock_in_time = times[clock_in_idx]
+    clock_out_time = times[clock_out_idx]
+
+    pre_work_min = clock_in_idx
+    post_work_min = n - clock_out_idx - 1
     work_duration_min = clock_out_idx - clock_in_idx + 1
-    
+
     return {
         "clock_in_idx": clock_in_idx,
         "clock_out_idx": clock_out_idx,
